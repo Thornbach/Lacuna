@@ -1,0 +1,59 @@
+﻿model_id: facebook/dinov3-vitb16-pretrain-lvd1689m | feature_layers: (-1, -6) | patch: 16
+python.exe : 
+At line:2 char:1
++ & E:/Program_Files/Conda/python.exe "e:\PhD_TobiMu\02_code\FoliarTool ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Loading weights:   0%|          | 0/211 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 211/211 [00:00<00:00, 4290.19it/s]
+CONFIG: {
+  "hidden_size": 768,
+  "num_attention_heads": 12,
+  "num_hidden_layers": 12,
+  "patch_size": 16,
+  "num_register_tokens": 4,
+  "layerscale_value": 1.0,
+  "mlp_ratio": null,
+  "rope_theta": 100.0,
+  "hidden_act": "gelu",
+  "image_size": 224,
+  "num_channels": 3,
+  "layer_norm_eps": 1e-05,
+  "pos_embed_rope_base": null,
+  "pos_embed_rope_min_period": null,
+  "pos_embed_rope_max_period": null,
+  "feature_layers": [
+    -1,
+    -6
+  ]
+}
+
+state_dict: 211 tensors
+  embeddings.cls_token                                         (1, 1, 768)
+  embeddings.mask_token                                        (1, 1, 768)
+  embeddings.register_tokens                                   (1, 4, 768)
+  embeddings.patch_embeddings.weight                           (768, 3, 16, 16)
+  embeddings.patch_embeddings.bias                             (768,)
+  model.layer.0.norm1.weight                                   (768,)
+  model.layer.0.norm1.bias                                     (768,)
+  model.layer.0.attention.k_proj.weight                        (768, 768)
+  model.layer.0.attention.v_proj.weight                        (768, 768)
+  model.layer.0.attention.v_proj.bias                          (768,)
+  model.layer.0.attention.q_proj.weight                        (768, 768)
+  model.layer.0.attention.q_proj.bias                          (768,)
+  model.layer.0.attention.o_proj.weight                        (768, 768)
+  model.layer.0.attention.o_proj.bias                          (768,)
+  model.layer.0.layer_scale1.lambda1                           (768,)
+  model.layer.0.norm2.weight                                   (768,)
+  model.layer.0.norm2.bias                                     (768,)
+  model.layer.0.mlp.up_proj.weight                             (3072, 768)
+  model.layer.0.mlp.up_proj.bias                               (3072,)
+  model.layer.0.mlp.down_proj.weight                           (768, 3072)
+  model.layer.0.mlp.down_proj.bias                             (768,)
+  model.layer.0.layer_scale2.lambda1                           (768,)
+  norm.weight                                                  (768,)
+  norm.bias                                                    (768,)
+
+saved 211 tensors -> dino_weights.safetensors

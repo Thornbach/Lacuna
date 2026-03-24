@@ -1,0 +1,1751 @@
+
+=== Training started ===
+[     0.0s] Requesting CUDA compute device…
+[     0.2s] CUDA device ready.
+[     0.2s] Loading 2376 training images…
+[    13.5s] Loading 263 validation images…
+[    15.2s] Pre-generating fixed validation damages (20 images, seeded)…
+[    15.3s] Fixed validation set ready (20 images).
+[    15.3s] Initialising generator weights…
+[    15.3s] Initialising discriminator weights…
+[    15.3s] Models ready.
+[    15.3s] Curriculum: damage max ramps 2%→40% over 60 epochs, then 40% full range
+[    33.6s] s0/f0 G_fwd_det_done
+[    37.8s] s0/f1 d_real=-0.2035
+[    37.8s] s0/f2 d_fake=-0.1258
+[    37.9s] s0/f3 d_loss=0.6054
+[    48.6s] s0/f3b D_backward_done
+[    49.1s] s0/f4 D_opt_done
+[    49.1s] s0/f4b G_fwd_done (pretrain=false)
+[    49.5s] s0/f5 g_recon=2.4100
+[    49.8s] s0 g_tv=0.0106 g_conf=0.6915 g_sym=0.0121
+[    49.8s] s0/f6 g_adv=0.0804
+[    50.0s] s1/f0 G_fwd_det_done
+[    50.0s] s1/f1 d_real=1.1598
+[    50.0s] s1/f2 d_fake=1.1796
+[    50.0s] s1/f3 d_loss=0.6817
+[    50.1s] s1/f3b D_backward_done
+[    50.5s] s1/f4 D_opt_done
+[    50.5s] s1/f4b G_fwd_done (pretrain=false)
+[    50.5s] s1/f5 g_recon=2.4379
+[    50.5s] s1 g_tv=0.0112 g_conf=0.6916 g_sym=0.0133
+[    50.5s] s1/f6 g_adv=0.0336
+[    50.6s] s2/f0 G_fwd_det_done
+[    50.6s] s2/f1 d_real=0.5846
+[    50.6s] s2/f2 d_fake=0.5664
+[    50.6s] s2/f3 d_loss=0.1789
+[    50.6s] s2/f3b D_backward_done
+[    50.6s] s2/f4 D_opt_done
+[    50.6s] s2/f4b G_fwd_done (pretrain=false)
+[    50.6s] s2/f5 g_recon=2.4125
+[    50.6s] s2 g_tv=0.0112 g_conf=0.6915 g_sym=0.0137
+[    50.6s] s2/f6 g_adv=0.2185
+[    50.6s] s3/f0 G_fwd_det_done
+[    50.6s] s3/f1 d_real=0.3389
+[    50.6s] s3/f2 d_fake=0.2924
+[    50.6s] s3/f3 d_loss=0.1770
+[    50.7s] s3/f3b D_backward_done
+[    50.7s] s3/f4 D_opt_done
+[    50.7s] s3/f4b G_fwd_done (pretrain=false)
+[    50.7s] s3/f5 g_recon=2.4206
+[    50.7s] s3 g_tv=0.0110 g_conf=0.6914 g_sym=0.0133
+[    50.7s] s3/f6 g_adv=0.1651
+[    83.4s] s3/f6b G_backward_done
+[    83.6s] s3/f7 G_opt_done
+[    83.7s] s4/f0 G_fwd_det_done
+[    83.7s] s4/f1 d_real=0.3166
+[    83.7s] s4/f2 d_fake=0.2475
+[    83.7s] s4/f3 d_loss=0.1810
+[    83.7s] s4/f3b D_backward_done
+[    83.8s] s4/f4 D_opt_done
+[    83.9s] s4/f4b G_fwd_done (pretrain=false)
+[    83.9s] s4/f5 g_recon=2.3266
+[    83.9s] s4 g_tv=0.0045 g_conf=0.6892 g_sym=0.0112
+[    83.9s] s4/f6 g_adv=0.0719
+[    83.9s]   batch 5 (step 5) [323ms]
+[    84.0s] s5/f0 G_fwd_det_done
+[    84.0s] s5/f1 d_real=0.5726
+[    84.0s] s5/f2 d_fake=0.4556
+[    84.0s] s5/f3 d_loss=0.1136
+[    84.0s] s5/f3b D_backward_done
+[    84.1s] s5/f4 D_opt_done
+[    84.1s] s5/f4b G_fwd_done (pretrain=false)
+[    84.1s] s5/f5 g_recon=2.3492
+[    84.1s] s5 g_tv=0.0053 g_conf=0.6887 g_sym=0.0135
+[    84.1s] s5/f6 g_adv=0.0639
+[    84.1s] s6/f0 G_fwd_det_done
+[    84.1s] s6/f1 d_real=0.6891
+[    84.1s] s6/f2 d_fake=0.5380
+[    84.1s] s6/f3 d_loss=0.1193
+[    84.1s] s6/f3b D_backward_done
+[    84.1s] s6/f4 D_opt_done
+[    84.1s] s6/f4b G_fwd_done (pretrain=false)
+[    84.1s] s6/f5 g_recon=2.3285
+[    84.1s] s6 g_tv=0.0050 g_conf=0.6883 g_sym=0.0143
+[    84.1s] s6/f6 g_adv=0.1234
+[    84.2s] s7/f0 G_fwd_det_done
+[    84.2s] s7/f1 d_real=0.5406
+[    84.2s] s7/f2 d_fake=0.3499
+[    84.2s] s7/f3 d_loss=0.0867
+[    84.2s] s7/f3b D_backward_done
+[    84.2s] s7/f4 D_opt_done
+[    84.2s] s7/f4b G_fwd_done (pretrain=false)
+[    84.2s] s7/f5 g_recon=2.3487
+[    84.2s] s7 g_tv=0.0050 g_conf=0.6887 g_sym=0.0080
+[    84.2s] s7/f6 g_adv=0.1622
+[    84.4s] s7/f6b G_backward_done
+[    84.6s] s7/f7 G_opt_done
+[    84.6s] s8/f0 G_fwd_det_done
+[    84.6s] s8/f1 d_real=0.5113
+[    84.6s] s8/f2 d_fake=0.3103
+[    84.6s] s8/f3 d_loss=0.0915
+[    84.6s] s8/f3b D_backward_done
+[    84.6s] s8/f4 D_opt_done
+[    84.7s] s8/f4b G_fwd_done (pretrain=false)
+[    84.7s] s8/f5 g_recon=2.2775
+[    84.7s] s8 g_tv=0.0054 g_conf=0.6837 g_sym=0.0145
+[    84.7s] s8/f6 g_adv=0.1201
+[    84.7s] s9/f0 G_fwd_det_done
+[    84.7s] s9/f1 d_real=0.6416
+[    84.7s] s9/f2 d_fake=0.3651
+[    84.7s] s9/f3 d_loss=0.0656
+[    84.7s] s9/f3b D_backward_done
+[    84.7s] s9/f4 D_opt_done
+[    84.7s] s9/f4b G_fwd_done (pretrain=false)
+[    84.7s] s9/f5 g_recon=2.2453
+[    84.7s] s9 g_tv=0.0055 g_conf=0.6844 g_sym=0.0163
+[    84.7s] s9/f6 g_adv=0.1479
+[    84.7s]   batch 10 (step 10) [51ms]
+[    84.7s] s10/f0 G_fwd_det_done
+[    84.7s] s10/f1 d_real=0.6507
+[    84.7s] s10/f2 d_fake=0.2953
+[    84.7s] s10/f3 d_loss=0.0464
+[    84.7s] s10/f3b D_backward_done
+[    84.7s] s10/f4 D_opt_done
+[    84.8s] s10/f4b G_fwd_done (pretrain=false)
+[    84.8s] s10/f5 g_recon=2.2720
+[    84.8s] s10 g_tv=0.0052 g_conf=0.6855 g_sym=0.0295
+[    84.8s] s10/f6 g_adv=0.1859
+[    84.8s] s11/f0 G_fwd_det_done
+[    84.8s] s11/f1 d_real=0.6754
+[    84.8s] s11/f2 d_fake=0.3132
+[    84.8s] s11/f3 d_loss=0.0493
+[    84.8s] s11/f3b D_backward_done
+[    84.8s] s11/f4 D_opt_done
+[    84.8s] s11/f4b G_fwd_done (pretrain=false)
+[    84.8s] s11/f5 g_recon=2.2943
+[    84.8s] s11 g_tv=0.0052 g_conf=0.6828 g_sym=0.0236
+[    84.8s] s11/f6 g_adv=0.2009
+[    85.0s] s11/f6b G_backward_done
+[    85.0s] s11/f7 G_opt_done
+[    85.0s] s12/f0 G_fwd_det_done
+[    85.1s] s12/f1 d_real=0.6948
+[    85.1s] s12/f2 d_fake=0.1048
+[    85.1s] s12/f3 d_loss=0.0226
+[    85.1s] s12/f3b D_backward_done
+[    85.1s] s12/f4 D_opt_done
+[    85.1s] s12/f4b G_fwd_done (pretrain=false)
+[    85.1s] s12/f5 g_recon=2.3282
+[    85.1s] s12 g_tv=0.0038 g_conf=0.6729 g_sym=0.0120
+[    85.1s] s12/f6 g_adv=0.1400
+[    85.1s] s13/f0 G_fwd_det_done
+[    85.1s] s13/f1 d_real=0.9456
+[    85.1s] s13/f2 d_fake=0.3512
+[    85.1s] s13/f3 d_loss=0.0555
+[    85.1s] s13/f3b D_backward_done
+[    85.1s] s13/f4 D_opt_done
+[    85.1s] s13/f4b G_fwd_done (pretrain=false)
+[    85.1s] s13/f5 g_recon=2.3270
+[    85.1s] s13 g_tv=0.0041 g_conf=0.6727 g_sym=0.0144
+[    85.1s] s13/f6 g_adv=0.4594
+[    85.2s] s14/f0 G_fwd_det_done
+[    85.2s] s14/f1 d_real=0.5136
+[    85.2s] s14/f2 d_fake=-0.1038
+[    85.2s] s14/f3 d_loss=0.0956
+[    85.2s] s14/f3b D_backward_done
+[    85.2s] s14/f4 D_opt_done
+[    85.2s] s14/f4b G_fwd_done (pretrain=false)
+[    85.2s] s14/f5 g_recon=2.3363
+[    85.2s] s14 g_tv=0.0039 g_conf=0.6723 g_sym=0.0137
+[    85.2s] s14/f6 g_adv=0.0963
+[    85.2s]   batch 15 (step 15) [51ms]
+[    85.2s] s15/f0 G_fwd_det_done
+[    85.2s] s15/f1 d_real=1.0330
+[    85.2s] s15/f2 d_fake=0.3996
+[    85.2s] s15/f3 d_loss=0.0699
+[    85.2s] s15/f3b D_backward_done
+[    85.2s] s15/f4 D_opt_done
+[    85.2s] s15/f4b G_fwd_done (pretrain=false)
+[    85.2s] s15/f5 g_recon=2.3313
+[    85.2s] s15 g_tv=0.0034 g_conf=0.6736 g_sym=0.0128
+[    85.2s] s15/f6 g_adv=0.3094
+[    85.5s] s15/f6b G_backward_done
+[    85.5s] s15/f7 G_opt_done
+[    85.5s] s16/f0 G_fwd_det_done
+[    85.5s] s16/f1 d_real=0.6407
+[    85.5s] s16/f2 d_fake=0.0793
+[    85.5s] s16/f3 d_loss=0.0307
+[    85.5s] s16/f3b D_backward_done
+[    85.5s] s16/f4 D_opt_done
+[    85.5s] s16/f4b G_fwd_done (pretrain=false)
+[    85.5s] s16/f5 g_recon=2.3449
+[    85.5s] s16 g_tv=0.0036 g_conf=0.6635 g_sym=0.0185
+[    85.5s] s16/f6 g_adv=0.2339
+[    85.5s] s17/f0 G_fwd_det_done
+[    85.5s] s17/f1 d_real=0.7713
+[    85.5s] s17/f2 d_fake=0.1403
+[    85.5s] s17/f3 d_loss=0.0122
+[    85.5s] s17/f3b D_backward_done
+[    85.5s] s17/f4 D_opt_done
+[    85.6s] s17/f4b G_fwd_done (pretrain=false)
+[    85.6s] s17/f5 g_recon=2.3625
+[    85.6s] s17 g_tv=0.0034 g_conf=0.6634 g_sym=0.0176
+[    85.6s] s17/f6 g_adv=0.2022
+[    85.6s] s18/f0 G_fwd_det_done
+[    85.6s] s18/f1 d_real=0.8887
+[    85.6s] s18/f2 d_fake=0.2913
+[    85.6s] s18/f3 d_loss=0.0284
+[    85.6s] s18/f3b D_backward_done
+[    85.6s] s18/f4 D_opt_done
+[    85.6s] s18/f4b G_fwd_done (pretrain=false)
+[    85.6s] s18/f5 g_recon=2.3569
+[    85.6s] s18 g_tv=0.0035 g_conf=0.6628 g_sym=0.0206
+[    85.6s] s18/f6 g_adv=0.3245
+[    85.6s] s19/f0 G_fwd_det_done
+[    85.6s] s19/f1 d_real=0.6791
+[    85.6s] s19/f2 d_fake=0.0165
+[    85.6s] s19/f3 d_loss=0.0272
+[    85.6s] s19/f3b D_backward_done
+[    85.6s] s19/f4 D_opt_done
+[    85.7s] s19/f4b G_fwd_done (pretrain=false)
+[    85.7s] s19/f5 g_recon=2.3263
+[    85.7s] s19 g_tv=0.0034 g_conf=0.6635 g_sym=0.0147
+[    85.7s] s19/f6 g_adv=0.2145
+[    85.9s] s19/f6b G_backward_done
+[    85.9s] s19/f7 G_opt_done
+[    85.9s]   batch 20 (step 20) [269ms]
+[    85.9s] s20/f0 G_fwd_det_done
+[    85.9s] s20/f1 d_real=0.9337
+[    85.9s] s20/f2 d_fake=0.2257
+[    85.9s] s20/f3 d_loss=0.0201
+[    85.9s] s20/f3b D_backward_done
+[    85.9s] s20/f4 D_opt_done
+[    85.9s] s20/f4b G_fwd_done (pretrain=false)
+[    85.9s] s20/f5 g_recon=2.2698
+[    85.9s] s20 g_tv=0.0037 g_conf=0.6608 g_sym=0.0228
+[    85.9s] s20/f6 g_adv=0.3152
+[    85.9s] s21/f0 G_fwd_det_done
+[    85.9s] s21/f1 d_real=0.7678
+[    85.9s] s21/f2 d_fake=0.0386
+[    85.9s] s21/f3 d_loss=0.0126
+[    86.0s] s21/f3b D_backward_done
+[    86.0s] s21/f4 D_opt_done
+[    86.0s] s21/f4b G_fwd_done (pretrain=false)
+[    86.0s] s21/f5 g_recon=2.2755
+[    86.0s] s21 g_tv=0.0036 g_conf=0.6622 g_sym=0.0268
+[    86.0s] s21/f6 g_adv=0.2523
+[    86.0s] s22/f0 G_fwd_det_done
+[    86.0s] s22/f1 d_real=0.8031
+[    86.0s] s22/f2 d_fake=0.1934
+[    86.0s] s22/f3 d_loss=0.0147
+[    86.0s] s22/f3b D_backward_done
+[    86.0s] s22/f4 D_opt_done
+[    86.0s] s22/f4b G_fwd_done (pretrain=false)
+[    86.0s] s22/f5 g_recon=2.2765
+[    86.0s] s22 g_tv=0.0039 g_conf=0.6598 g_sym=0.0266
+[    86.0s] s22/f6 g_adv=0.2314
+[    86.0s] s23/f0 G_fwd_det_done
+[    86.1s] s23/f1 d_real=0.8763
+[    86.1s] s23/f2 d_fake=0.1814
+[    86.1s] s23/f3 d_loss=0.0168
+[    86.1s] s23/f3b D_backward_done
+[    86.1s] s23/f4 D_opt_done
+[    86.1s] s23/f4b G_fwd_done (pretrain=false)
+[    86.1s] s23/f5 g_recon=2.3009
+[    86.1s] s23 g_tv=0.0040 g_conf=0.6601 g_sym=0.0266
+[    86.1s] s23/f6 g_adv=0.3316
+[    86.3s] s23/f6b G_backward_done
+[    86.3s] s23/f7 G_opt_done
+[    86.3s] s24/f0 G_fwd_det_done
+[    86.3s] s24/f1 d_real=0.7266
+[    86.3s] s24/f2 d_fake=0.0890
+[    86.3s] s24/f3 d_loss=0.0188
+[    86.4s] s24/f3b D_backward_done
+[    86.4s] s24/f4 D_opt_done
+[    86.4s] s24/f4b G_fwd_done (pretrain=false)
+[    86.4s] s24/f5 g_recon=2.1932
+[    86.4s] s24 g_tv=0.0051 g_conf=0.6596 g_sym=0.0432
+[    86.4s] s24/f6 g_adv=0.2233
+[    86.4s]   batch 25 (step 25) [52ms]
+[    86.4s] s25/f0 G_fwd_det_done
+[    86.4s] s25/f1 d_real=0.8632
+[    86.4s] s25/f2 d_fake=0.1314
+[    86.4s] s25/f3 d_loss=0.0066
+[    86.4s] s25/f3b D_backward_done
+[    86.4s] s25/f4 D_opt_done
+[    86.4s] s25/f4b G_fwd_done (pretrain=false)
+[    86.4s] s25/f5 g_recon=2.1681
+[    86.4s] s25 g_tv=0.0041 g_conf=0.6649 g_sym=0.0329
+[    86.4s] s25/f6 g_adv=0.2651
+[    86.4s] s26/f0 G_fwd_det_done
+[    86.4s] s26/f1 d_real=0.8328
+[    86.4s] s26/f2 d_fake=0.1209
+[    86.4s] s26/f3 d_loss=0.0067
+[    86.5s] s26/f3b D_backward_done
+[    86.5s] s26/f4 D_opt_done
+[    86.5s] s26/f4b G_fwd_done (pretrain=false)
+[    86.5s] s26/f5 g_recon=2.2075
+[    86.5s] s26 g_tv=0.0042 g_conf=0.6631 g_sym=0.0217
+[    86.5s] s26/f6 g_adv=0.2784
+[    86.5s] s27/f0 G_fwd_det_done
+[    86.5s] s27/f1 d_real=0.8473
+[    86.5s] s27/f2 d_fake=0.1092
+[    86.5s] s27/f3 d_loss=0.0056
+[    86.5s] s27/f3b D_backward_done
+[    86.5s] s27/f4 D_opt_done
+[    86.5s] s27/f4b G_fwd_done (pretrain=false)
+[    86.5s] s27/f5 g_recon=2.2155
+[    86.5s] s27 g_tv=0.0043 g_conf=0.6647 g_sym=0.0413
+[    86.5s] s27/f6 g_adv=0.2894
+[    86.8s] s27/f6b G_backward_done
+[    86.8s] s27/f7 G_opt_done
+[    86.8s] s28/f0 G_fwd_det_done
+[    86.8s] s28/f1 d_real=0.8002
+[    86.8s] s28/f2 d_fake=0.1145
+[    86.8s] s28/f3 d_loss=0.0084
+[    86.8s] s28/f3b D_backward_done
+[    86.8s] s28/f4 D_opt_done
+[    86.8s] s28/f4b G_fwd_done (pretrain=false)
+[    86.8s] s28/f5 g_recon=2.2713
+[    86.8s] s28 g_tv=0.0046 g_conf=0.6563 g_sym=0.0291
+[    86.8s] s28/f6 g_adv=0.2413
+[    86.8s] s29/f0 G_fwd_det_done
+[    86.8s] s29/f1 d_real=0.8821
+[    86.8s] s29/f2 d_fake=0.1486
+[    86.9s] s29/f3 d_loss=0.0078
+[    86.9s] s29/f3b D_backward_done
+[    86.9s] s29/f4 D_opt_done
+[    86.9s] s29/f4b G_fwd_done (pretrain=false)
+[    86.9s] s29/f5 g_recon=2.2143
+[    86.9s] s29 g_tv=0.0048 g_conf=0.6579 g_sym=0.0447
+[    86.9s] s29/f6 g_adv=0.3249
+[    86.9s]   batch 30 (step 30) [52ms]
+[    86.9s] s30/f0 G_fwd_det_done
+[    86.9s] s30/f1 d_real=0.7828
+[    86.9s] s30/f2 d_fake=0.0418
+[    86.9s] s30/f3 d_loss=0.0108
+[    86.9s] s30/f3b D_backward_done
+[    86.9s] s30/f4 D_opt_done
+[    86.9s] s30/f4b G_fwd_done (pretrain=false)
+[    86.9s] s30/f5 g_recon=2.1688
+[    86.9s] s30 g_tv=0.0050 g_conf=0.6571 g_sym=0.0516
+[    86.9s] s30/f6 g_adv=0.2176
+[    86.9s] s31/f0 G_fwd_det_done
+[    86.9s] s31/f1 d_real=0.9353
+[    86.9s] s31/f2 d_fake=0.1938
+[    87.0s] s31/f3 d_loss=0.0138
+[    87.0s] s31/f3b D_backward_done
+[    87.0s] s31/f4 D_opt_done
+[    87.0s] s31/f4b G_fwd_done (pretrain=false)
+[    87.0s] s31/f5 g_recon=2.1641
+[    87.0s] s31 g_tv=0.0045 g_conf=0.6582 g_sym=0.0270
+[    87.0s] s31/f6 g_adv=0.3773
+[    87.2s] s31/f6b G_backward_done
+[    87.2s] s31/f7 G_opt_done
+[    87.2s] s32/f0 G_fwd_det_done
+[    87.2s] s32/f1 d_real=0.6956
+[    87.2s] s32/f2 d_fake=-0.0383
+[    87.2s] s32/f3 d_loss=0.0293
+[    87.2s] s32/f3b D_backward_done
+[    87.2s] s32/f4 D_opt_done
+[    87.3s] s32/f4b G_fwd_done (pretrain=false)
+[    87.3s] s32/f5 g_recon=2.3546
+[    87.3s] s32 g_tv=0.0050 g_conf=0.6458 g_sym=0.0240
+[    87.3s] s32/f6 g_adv=0.1501
+[    87.3s] s33/f0 G_fwd_det_done
+[    87.3s] s33/f1 d_real=1.0449
+[    87.3s] s33/f2 d_fake=0.3896
+[    87.3s] s33/f3 d_loss=0.0723
+[    87.3s] s33/f3b D_backward_done
+[    87.3s] s33/f4 D_opt_done
+[    87.3s] s33/f4b G_fwd_done (pretrain=false)
+[    87.3s] s33/f5 g_recon=2.2941
+[    87.3s] s33 g_tv=0.0051 g_conf=0.6439 g_sym=0.0289
+[    87.3s] s33/f6 g_adv=0.5121
+[    87.3s] s34/f0 G_fwd_det_done
+[    87.3s] s34/f1 d_real=0.4690
+[    87.3s] s34/f2 d_fake=-0.1672
+[    87.4s] s34/f3 d_loss=0.1209
+[    87.4s] s34/f3b D_backward_done
+[    87.4s] s34/f4 D_opt_done
+[    87.4s] s34/f4b G_fwd_done (pretrain=false)
+[    87.4s] s34/f5 g_recon=2.2650
+[    87.4s] s34 g_tv=0.0049 g_conf=0.6465 g_sym=0.0291
+[    87.4s] s34/f6 g_adv=0.0913
+[    87.4s]   batch 35 (step 35) [55ms]
+[    87.4s] s35/f0 G_fwd_det_done
+[    87.4s] s35/f1 d_real=0.9970
+[    87.4s] s35/f2 d_fake=0.4413
+[    87.4s] s35/f3 d_loss=0.0974
+[    87.4s] s35/f3b D_backward_done
+[    87.4s] s35/f4 D_opt_done
+[    87.4s] s35/f4b G_fwd_done (pretrain=false)
+[    87.4s] s35/f5 g_recon=2.2734
+[    87.4s] s35 g_tv=0.0051 g_conf=0.6444 g_sym=0.0267
+[    87.4s] s35/f6 g_adv=0.2586
+[    87.6s] s35/f6b G_backward_done
+[    87.7s] s35/f7 G_opt_done
+[    87.7s] s36/f0 G_fwd_det_done
+[    87.7s] s36/f1 d_real=0.6731
+[    87.7s] s36/f2 d_fake=0.1597
+[    87.7s] s36/f3 d_loss=0.0229
+[    87.7s] s36/f3b D_backward_done
+[    87.7s] s36/f4 D_opt_done
+[    87.7s] s36/f4b G_fwd_done (pretrain=false)
+[    87.7s] s36/f5 g_recon=2.1695
+[    87.7s] s36 g_tv=0.0055 g_conf=0.6459 g_sym=0.0231
+[    87.7s] s36/f6 g_adv=0.2634
+[    87.7s] s37/f0 G_fwd_det_done
+[    87.7s] s37/f1 d_real=0.7091
+[    87.7s] s37/f2 d_fake=0.1058
+[    87.7s] s37/f3 d_loss=0.0178
+[    87.7s] s37/f3b D_backward_done
+[    87.7s] s37/f4 D_opt_done
+[    87.8s] s37/f4b G_fwd_done (pretrain=false)
+[    87.8s] s37/f5 g_recon=2.1027
+[    87.8s] s37 g_tv=0.0058 g_conf=0.6534 g_sym=0.0454
+[    87.8s] s37/f6 g_adv=0.1803
+[    87.8s] s38/f0 G_fwd_det_done
+[    87.8s] s38/f1 d_real=0.9436
+[    87.8s] s38/f2 d_fake=0.2582
+[    87.8s] s38/f3 d_loss=0.0218
+[    87.8s] s38/f3b D_backward_done
+[    87.8s] s38/f4 D_opt_done
+[    87.8s] s38/f4b G_fwd_done (pretrain=false)
+[    87.8s] s38/f5 g_recon=2.0979
+[    87.8s] s38 g_tv=0.0058 g_conf=0.6588 g_sym=0.0313
+[    87.8s] s38/f6 g_adv=0.3817
+[    87.8s] s39/f0 G_fwd_det_done
+[    87.8s] s39/f1 d_real=0.6478
+[    87.8s] s39/f2 d_fake=-0.0073
+[    87.8s] s39/f3 d_loss=0.0339
+[    87.8s] s39/f3b D_backward_done
+[    87.8s] s39/f4 D_opt_done
+[    87.9s] s39/f4b G_fwd_done (pretrain=false)
+[    87.9s] s39/f5 g_recon=2.1532
+[    87.9s] s39 g_tv=0.0059 g_conf=0.6510 g_sym=0.0578
+[    87.9s] s39/f6 g_adv=0.1854
+[    88.1s] s39/f6b G_backward_done
+[    88.1s] s39/f7 G_opt_done
+[    88.1s]   batch 40 (step 40) [272ms]
+[    88.5s]   batch 45 (step 45) [35ms]
+[    89.1s]   batch 50 (step 50) [52ms]
+[    89.6s]   batch 55 (step 55) [50ms]
+[    90.4s]   batch 60 (step 60) [304ms]
+[    93.4s]   batch 65 (step 65) [75ms]
+[    95.2s]   batch 70 (step 70) [234ms]
+[    96.4s]   batch 75 (step 75) [113ms]
+[   100.0s]   batch 80 (step 80) [1449ms]
+[   101.6s]   batch 85 (step 85) [182ms]
+[   103.6s]   batch 90 (step 90) [129ms]
+[   105.1s]   batch 95 (step 95) [140ms]
+[   106.9s]   batch 100 (step 100) [892ms]
+[   107.0s] s100/f0 G_fwd_det_done
+[   107.0s] s100/f1 d_real=0.8471
+[   107.0s] s100/f2 d_fake=0.2472
+[   107.0s] s100/f3 d_loss=0.0273
+[   107.0s] s100/f3b D_backward_done
+[   107.0s] s100/f4 D_opt_done
+[   107.0s] s100/f4b G_fwd_done (pretrain=false)
+[   107.0s] s100/f5 g_recon=1.9893
+[   107.0s] s100 g_tv=0.0096 g_conf=0.5821 g_sym=0.1139
+[   107.1s] s100/f6 g_adv=0.2629
+[   108.3s]   batch 105 (step 105) [59ms]
+[   109.4s]   batch 110 (step 110) [91ms]
+[   110.8s]   batch 115 (step 115) [124ms]
+[   113.5s]   batch 120 (step 120) [1038ms]
+[   114.7s]   batch 125 (step 125) [70ms]
+[   116.2s]   batch 130 (step 130) [83ms]
+[   118.6s]   batch 135 (step 135) [94ms]
+[   121.6s]   batch 140 (step 140) [1397ms]
+[   123.1s]   batch 145 (step 145) [86ms]
+[   125.1s]   batch 150 (step 150) [65ms]
+[   127.1s]   batch 155 (step 155) [154ms]
+[   130.2s]   batch 160 (step 160) [1545ms]
+[   132.5s]   batch 165 (step 165) [51ms]
+[   134.8s]   batch 170 (step 170) [83ms]
+[   137.0s]   batch 175 (step 175) [160ms]
+[   140.4s]   batch 180 (step 180) [1386ms]
+[   142.4s]   batch 185 (step 185) [288ms]
+[   144.4s]   batch 190 (step 190) [231ms]
+[   146.8s]   batch 195 (step 195) [205ms]
+[   150.7s] Saving batch checkpoint (step 200)…
+[   150.9s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   150.9s]   Batch checkpoint saved (step 200)
+[   150.9s]   batch 200 (step 200) [1906ms]
+[   150.9s] s200/f0 G_fwd_det_done
+[   151.0s] s200/f1 d_real=0.8202
+[   151.0s] s200/f2 d_fake=0.1112
+[   151.0s] s200/f3 d_loss=0.0036
+[   151.0s] s200/f3b D_backward_done
+[   151.0s] s200/f4 D_opt_done
+[   151.0s] s200/f4b G_fwd_done (pretrain=false)
+[   151.0s] s200/f5 g_recon=2.1302
+[   151.0s] s200 g_tv=0.0290 g_conf=0.4599 g_sym=0.1193
+[   151.1s] s200/f6 g_adv=0.2879
+[   152.5s]   batch 205 (step 205) [226ms]
+[   154.2s]   batch 210 (step 210) [174ms]
+[   156.2s]   batch 215 (step 215) [177ms]
+[   160.1s]   batch 220 (step 220) [1441ms]
+[   162.0s]   batch 225 (step 225) [75ms]
+[   164.1s]   batch 230 (step 230) [84ms]
+[   166.4s]   batch 235 (step 235) [172ms]
+[   170.0s]   batch 240 (step 240) [1288ms]
+[   172.8s]   batch 245 (step 245) [239ms]
+[   175.3s]   batch 250 (step 250) [66ms]
+[   177.2s]   batch 255 (step 255) [199ms]
+[   181.0s]   batch 260 (step 260) [1621ms]
+[   183.7s]   batch 265 (step 265) [262ms]
+[   185.6s]   batch 270 (step 270) [97ms]
+[   188.3s]   batch 275 (step 275) [174ms]
+[   191.0s]   batch 280 (step 280) [959ms]
+[   193.1s]   batch 285 (step 285) [328ms]
+[   195.5s]   batch 290 (step 290) [267ms]
+[   198.0s]   batch 295 (step 295) [228ms]
+[   201.7s]   batch 300 (step 300) [1626ms]
+[   201.8s] s300/f0 G_fwd_det_done
+[   201.8s] s300/f1 d_real=0.7731
+[   201.8s] s300/f2 d_fake=0.0228
+[   201.8s] s300/f3 d_loss=0.0075
+[   201.9s] s300/f3b D_backward_done
+[   201.9s] s300/f4 D_opt_done
+[   202.0s] s300/f4b G_fwd_done (pretrain=false)
+[   202.0s] s300/f5 g_recon=2.0069
+[   202.0s] s300 g_tv=0.0528 g_conf=0.4330 g_sym=0.1325
+[   202.0s] s300/f6 g_adv=0.2387
+[   203.5s]   batch 305 (step 305) [74ms]
+[   205.3s]   batch 310 (step 310) [227ms]
+[   207.4s]   batch 315 (step 315) [84ms]
+[   210.8s]   batch 320 (step 320) [1258ms]
+[   213.2s]   batch 325 (step 325) [148ms]
+[   216.5s]   batch 330 (step 330) [313ms]
+[   219.6s]   batch 335 (step 335) [218ms]
+[   223.8s]   batch 340 (step 340) [2185ms]
+[   226.3s]   batch 345 (step 345) [55ms]
+[   229.3s]   batch 350 (step 350) [71ms]
+[   232.2s]   batch 355 (step 355) [353ms]
+[   236.6s]   batch 360 (step 360) [2094ms]
+[   238.7s]   batch 365 (step 365) [119ms]
+[   241.6s]   batch 370 (step 370) [184ms]
+[   245.0s]   batch 375 (step 375) [355ms]
+[   249.4s]   batch 380 (step 380) [1698ms]
+[   251.5s]   batch 385 (step 385) [145ms]
+[   254.3s]   batch 390 (step 390) [275ms]
+[   257.7s]   batch 395 (step 395) [114ms]
+[   261.0s] Saving batch checkpoint (step 400)…
+[   261.2s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   261.2s]   Batch checkpoint saved (step 400)
+[   261.2s]   batch 400 (step 400) [1363ms]
+[   261.2s] s400/f0 G_fwd_det_done
+[   261.2s] s400/f1 d_real=0.8417
+[   261.2s] s400/f2 d_fake=0.0534
+[   261.2s] s400/f3 d_loss=0.0052
+[   261.2s] s400/f4 D_opt_done
+[   261.3s] s400/f4b G_fwd_done (pretrain=false)
+[   261.3s] s400/f5 g_recon=2.1202
+[   261.3s] s400 g_tv=0.0585 g_conf=0.3327 g_sym=0.1487
+[   261.3s] s400/f6 g_adv=0.3199
+[   263.8s]   batch 405 (step 405) [59ms]
+[   266.9s]   batch 410 (step 410) [329ms]
+[   269.3s]   batch 415 (step 415) [102ms]
+[   273.4s]   batch 420 (step 420) [1097ms]
+[   275.8s]   batch 425 (step 425) [49ms]
+[   277.7s]   batch 430 (step 430) [144ms]
+[   279.9s]   batch 435 (step 435) [116ms]
+[   282.1s]   batch 440 (step 440) [838ms]
+[   283.8s]   batch 445 (step 445) [129ms]
+[   285.2s]   batch 450 (step 450) [105ms]
+[   286.9s]   batch 455 (step 455) [77ms]
+[   289.3s]   batch 460 (step 460) [908ms]
+[   291.5s]   batch 465 (step 465) [105ms]
+[   293.7s]   batch 470 (step 470) [74ms]
+[   295.6s]   batch 475 (step 475) [85ms]
+[   298.6s]   batch 480 (step 480) [957ms]
+[   301.0s]   batch 485 (step 485) [48ms]
+[   302.8s]   batch 490 (step 490) [67ms]
+[   304.2s]   batch 495 (step 495) [82ms]
+[   307.9s]   batch 500 (step 500) [1541ms]
+[   307.9s] s500/f0 G_fwd_det_done
+[   307.9s] s500/f1 d_real=0.8018
+[   307.9s] s500/f2 d_fake=0.0107
+[   307.9s] s500/f3 d_loss=0.0069
+[   307.9s] s500/f4 D_opt_done
+[   307.9s] s500/f4b G_fwd_done (pretrain=false)
+[   307.9s] s500/f5 g_recon=2.1272
+[   307.9s] s500 g_tv=0.0867 g_conf=0.3816 g_sym=0.1773
+[   307.9s] s500/f6 g_adv=0.3530
+[   310.0s]   batch 505 (step 505) [101ms]
+[   312.1s]   batch 510 (step 510) [175ms]
+[   314.5s]   batch 515 (step 515) [118ms]
+[   317.2s]   batch 520 (step 520) [1111ms]
+[   318.8s]   batch 525 (step 525) [186ms]
+[   321.4s]   batch 530 (step 530) [105ms]
+[   323.5s]   batch 535 (step 535) [175ms]
+[   326.0s]   batch 540 (step 540) [847ms]
+[   328.1s]   batch 545 (step 545) [177ms]
+[   329.8s]   batch 550 (step 550) [164ms]
+[   332.1s]   batch 555 (step 555) [171ms]
+[   335.0s]   batch 560 (step 560) [923ms]
+[   336.8s]   batch 565 (step 565) [57ms]
+[   338.0s]   batch 570 (step 570) [49ms]
+[   339.6s]   batch 575 (step 575) [100ms]
+[   342.6s]   batch 580 (step 580) [1378ms]
+[   344.8s]   batch 585 (step 585) [137ms]
+[   346.9s]   batch 590 (step 590) [171ms]
+[   348.3s]   batch 595 (step 595) [176ms]
+[   351.7s] Saving batch checkpoint (step 600)…
+[   351.9s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   351.9s]   Batch checkpoint saved (step 600)
+[   351.9s]   batch 600 (step 600) [2146ms]
+[   351.9s] s600/f0 G_fwd_det_done
+[   352.0s] s600/f1 d_real=0.8482
+[   352.0s] s600/f2 d_fake=0.0809
+[   352.0s] s600/f3 d_loss=0.0022
+[   352.0s] s600/f4 D_opt_done
+[   352.0s] s600/f4b G_fwd_done (pretrain=false)
+[   352.0s] s600/f5 g_recon=2.0605
+[   352.0s] s600 g_tv=0.0938 g_conf=0.3305 g_sym=0.1624
+[   352.0s] s600/f6 g_adv=0.2957
+[   353.9s]   batch 605 (step 605) [134ms]
+[   355.6s]   batch 610 (step 610) [53ms]
+[   357.1s]   batch 615 (step 615) [67ms]
+[   360.3s]   batch 620 (step 620) [1746ms]
+[   362.3s]   batch 625 (step 625) [116ms]
+[   364.3s]   batch 630 (step 630) [166ms]
+[   366.4s]   batch 635 (step 635) [209ms]
+[   370.1s]   batch 640 (step 640) [1441ms]
+[   372.1s]   batch 645 (step 645) [114ms]
+[   373.2s]   batch 650 (step 650) [95ms]
+[   374.4s]   batch 655 (step 655) [75ms]
+[   376.7s]   batch 660 (step 660) [946ms]
+[   378.7s]   batch 665 (step 665) [95ms]
+[   380.8s]   batch 670 (step 670) [84ms]
+[   383.1s]   batch 675 (step 675) [123ms]
+[   386.1s]   batch 680 (step 680) [1168ms]
+[   387.4s]   batch 685 (step 685) [130ms]
+[   388.8s]   batch 690 (step 690) [57ms]
+[   390.2s]   batch 695 (step 695) [166ms]
+[   393.2s]   batch 700 (step 700) [929ms]
+[   393.4s] s700/f0 G_fwd_det_done
+[   393.4s] s700/f1 d_real=0.8261
+[   393.4s] s700/f2 d_fake=-0.0592
+[   393.4s] s700/f3 d_loss=0.0143
+[   393.4s] s700/f4 D_opt_done
+[   393.4s] s700/f4b G_fwd_done (pretrain=false)
+[   393.4s] s700/f5 g_recon=1.9477
+[   393.4s] s700 g_tv=0.0764 g_conf=0.3366 g_sym=0.1344
+[   393.4s] s700/f6 g_adv=0.4142
+[   394.8s]   batch 705 (step 705) [96ms]
+[   396.6s]   batch 710 (step 710) [129ms]
+[   398.2s]   batch 715 (step 715) [165ms]
+[   400.4s]   batch 720 (step 720) [723ms]
+[   402.5s]   batch 725 (step 725) [259ms]
+[   404.1s]   batch 730 (step 730) [115ms]
+[   406.1s]   batch 735 (step 735) [65ms]
+[   409.5s]   batch 740 (step 740) [1544ms]
+[   411.8s]   batch 745 (step 745) [180ms]
+[   412.9s]   batch 750 (step 750) [67ms]
+[   414.4s]   batch 755 (step 755) [145ms]
+[   416.9s]   batch 760 (step 760) [1001ms]
+[   418.6s]   batch 765 (step 765) [41ms]
+[   420.2s]   batch 770 (step 770) [154ms]
+[   422.5s]   batch 775 (step 775) [136ms]
+[   425.8s]   batch 780 (step 780) [1520ms]
+[   427.6s]   batch 785 (step 785) [149ms]
+[   429.1s]   batch 790 (step 790) [94ms]
+[   431.3s]   batch 795 (step 795) [96ms]
+[   434.7s] Saving batch checkpoint (step 800)…
+[   434.9s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   434.9s]   Batch checkpoint saved (step 800)
+[   434.9s]   batch 800 (step 800) [1238ms]
+[   434.9s] s800/f0 G_fwd_det_done
+[   434.9s] s800/f1 d_real=0.8090
+[   434.9s] s800/f2 d_fake=0.0505
+[   434.9s] s800/f3 d_loss=0.0030
+[   434.9s] s800/f4 D_opt_done
+[   434.9s] s800/f4b G_fwd_done (pretrain=false)
+[   434.9s] s800/f5 g_recon=1.9972
+[   434.9s] s800 g_tv=0.1484 g_conf=0.3307 g_sym=0.2238
+[   434.9s] s800/f6 g_adv=0.3211
+[   436.1s]   batch 805 (step 805) [137ms]
+[   437.6s]   batch 810 (step 810) [58ms]
+[   439.7s]   batch 815 (step 815) [111ms]
+[   442.6s]   batch 820 (step 820) [1556ms]
+[   444.3s]   batch 825 (step 825) [105ms]
+[   446.0s]   batch 830 (step 830) [279ms]
+[   448.0s]   batch 835 (step 835) [259ms]
+[   451.5s]   batch 840 (step 840) [1758ms]
+[   453.7s]   batch 845 (step 845) [263ms]
+[   455.7s]   batch 850 (step 850) [66ms]
+[   457.3s]   batch 855 (step 855) [143ms]
+[   460.9s]   batch 860 (step 860) [1730ms]
+[   463.0s]   batch 865 (step 865) [92ms]
+[   464.9s]   batch 870 (step 870) [160ms]
+[   466.9s]   batch 875 (step 875) [77ms]
+[   470.2s]   batch 880 (step 880) [1418ms]
+[   472.3s]   batch 885 (step 885) [121ms]
+[   474.3s]   batch 890 (step 890) [130ms]
+[   476.2s]   batch 895 (step 895) [167ms]
+[   479.5s]   batch 900 (step 900) [1495ms]
+[   479.6s] s900/f0 G_fwd_det_done
+[   479.6s] s900/f1 d_real=0.8540
+[   479.6s] s900/f2 d_fake=0.0745
+[   479.6s] s900/f3 d_loss=0.0023
+[   479.6s] s900/f4 D_opt_done
+[   479.6s] s900/f4b G_fwd_done (pretrain=false)
+[   479.6s] s900/f5 g_recon=1.9651
+[   479.6s] s900 g_tv=0.1212 g_conf=0.2544 g_sym=0.2075
+[   479.6s] s900/f6 g_adv=0.3015
+[   480.8s]   batch 905 (step 905) [76ms]
+[   482.3s]   batch 910 (step 910) [155ms]
+[   483.3s]   batch 915 (step 915) [65ms]
+[   485.8s]   batch 920 (step 920) [1664ms]
+[   488.1s]   batch 925 (step 925) [200ms]
+[   490.9s]   batch 930 (step 930) [241ms]
+[   493.1s]   batch 935 (step 935) [200ms]
+[   496.3s]   batch 940 (step 940) [1533ms]
+[   498.6s]   batch 945 (step 945) [129ms]
+[   500.8s]   batch 950 (step 950) [242ms]
+[   502.8s]   batch 955 (step 955) [87ms]
+[   506.6s]   batch 960 (step 960) [1607ms]
+[   508.6s]   batch 965 (step 965) [229ms]
+[   510.4s]   batch 970 (step 970) [229ms]
+[   512.7s]   batch 975 (step 975) [156ms]
+[   515.3s]   batch 980 (step 980) [579ms]
+[   516.7s]   batch 985 (step 985) [112ms]
+[   519.0s]   batch 990 (step 990) [234ms]
+[   522.2s]   batch 995 (step 995) [56ms]
+[   524.0s] Saving batch checkpoint (step 1000)…
+[   524.2s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   524.2s]   Batch checkpoint saved (step 1000)
+[   524.2s]   batch 1000 (step 1000) [1561ms]
+[   524.2s] s1000/f0 G_fwd_det_done
+[   524.2s] s1000/f1 d_real=0.8339
+[   524.2s] s1000/f2 d_fake=0.0178
+[   524.2s] s1000/f3 d_loss=0.0050
+[   524.2s] s1000/f4 D_opt_done
+[   524.3s] s1000/f4b G_fwd_done (pretrain=false)
+[   524.3s] s1000/f5 g_recon=1.8418
+[   524.3s] s1000 g_tv=0.1366 g_conf=0.3361 g_sym=0.1920
+[   524.3s] s1000/f6 g_adv=0.3473
+[   526.2s]   batch 1005 (step 1005) [216ms]
+[   528.2s]   batch 1010 (step 1010) [302ms]
+[   530.1s]   batch 1015 (step 1015) [182ms]
+[   533.1s]   batch 1020 (step 1020) [1096ms]
+[   534.8s]   batch 1025 (step 1025) [113ms]
+[   536.3s]   batch 1030 (step 1030) [123ms]
+[   538.5s]   batch 1035 (step 1035) [82ms]
+[   542.0s]   batch 1040 (step 1040) [1497ms]
+[   543.8s]   batch 1045 (step 1045) [187ms]
+[   545.6s]   batch 1050 (step 1050) [43ms]
+[   547.1s]   batch 1055 (step 1055) [76ms]
+[   550.4s]   batch 1060 (step 1060) [1221ms]
+[   552.4s]   batch 1065 (step 1065) [196ms]
+[   554.7s]   batch 1070 (step 1070) [135ms]
+[   556.6s]   batch 1075 (step 1075) [208ms]
+[   560.3s]   batch 1080 (step 1080) [2072ms]
+[   562.2s]   batch 1085 (step 1085) [88ms]
+[   564.2s]   batch 1090 (step 1090) [247ms]
+[   566.4s]   batch 1095 (step 1095) [186ms]
+[   570.7s]   batch 1100 (step 1100) [1552ms]
+[   570.8s] s1100/f0 G_fwd_det_done
+[   570.8s] s1100/f1 d_real=0.8537
+[   570.8s] s1100/f2 d_fake=-0.0130
+[   570.8s] s1100/f3 d_loss=0.0073
+[   570.8s] s1100/f4 D_opt_done
+[   570.9s] s1100/f4b G_fwd_done (pretrain=false)
+[   570.9s] s1100/f5 g_recon=1.9416
+[   570.9s] s1100 g_tv=0.1914 g_conf=0.3187 g_sym=0.1461
+[   570.9s] s1100/f6 g_adv=0.3726
+[   572.5s]   batch 1105 (step 1105) [217ms]
+[   573.7s]   batch 1110 (step 1110) [209ms]
+[   575.6s]   batch 1115 (step 1115) [130ms]
+[   578.4s]   batch 1120 (step 1120) [1139ms]
+[   580.7s]   batch 1125 (step 1125) [253ms]
+[   583.9s]   batch 1130 (step 1130) [180ms]
+[   586.2s]   batch 1135 (step 1135) [155ms]
+[   590.8s]   batch 1140 (step 1140) [1961ms]
+[   593.1s]   batch 1145 (step 1145) [154ms]
+[   595.5s]   batch 1150 (step 1150) [148ms]
+[   597.6s]   batch 1155 (step 1155) [167ms]
+[   601.1s]   batch 1160 (step 1160) [1517ms]
+[   603.5s]   batch 1165 (step 1165) [92ms]
+[   605.7s]   batch 1170 (step 1170) [206ms]
+[   607.8s]   batch 1175 (step 1175) [156ms]
+[   611.5s]   batch 1180 (step 1180) [1803ms]
+[   612.9s]   batch 1185 (step 1185) [108ms]
+[   613.8s] Validating (epoch 1)…
+[   617.2s] EPOCH 1: IoU=0.1109 Dice=0.1901 Prec=0.1182 Rec=0.7412
+[   617.2s] Building sample grid…
+[   623.6s] Epoch 1/100: IoU=0.1109  Dice=0.1901  Prec=0.1182  Rec=0.7412
+[   623.6s] Saving checkpoint: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_best
+[   623.7s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_best
+[   623.7s]   Checkpoint saved.
+[   625.2s]   batch 5 (step 1193) [135ms]
+[   626.8s]   batch 10 (step 1198) [100ms]
+[   628.2s] Saving batch checkpoint (step 1200)…
+[   628.4s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   628.4s]   Batch checkpoint saved (step 1200)
+[   628.4s] s1200/f0 G_fwd_det_done
+[   628.4s] s1200/f1 d_real=0.8406
+[   628.4s] s1200/f2 d_fake=0.0126
+[   628.4s] s1200/f3 d_loss=0.0050
+[   628.4s] s1200/f4 D_opt_done
+[   628.6s] s1200/f4b G_fwd_done (pretrain=false)
+[   628.6s] s1200/f5 g_recon=2.1315
+[   628.6s] s1200 g_tv=0.1758 g_conf=0.2550 g_sym=0.2097
+[   628.6s] s1200/f6 g_adv=0.3508
+[   628.8s]   batch 15 (step 1203) [112ms]
+[   632.5s]   batch 20 (step 1208) [1156ms]
+[   634.2s]   batch 25 (step 1213) [37ms]
+[   635.9s]   batch 30 (step 1218) [183ms]
+[   637.7s]   batch 35 (step 1223) [131ms]
+[   642.8s]   batch 40 (step 1228) [1939ms]
+[   644.9s]   batch 45 (step 1233) [290ms]
+[   647.3s]   batch 50 (step 1238) [292ms]
+[   650.3s]   batch 55 (step 1243) [162ms]
+[   654.4s]   batch 60 (step 1248) [1390ms]
+[   656.6s]   batch 65 (step 1253) [231ms]
+[   658.6s]   batch 70 (step 1258) [113ms]
+[   660.5s]   batch 75 (step 1263) [123ms]
+[   664.3s]   batch 80 (step 1268) [2437ms]
+[   666.4s]   batch 85 (step 1273) [105ms]
+[   667.6s]   batch 90 (step 1278) [121ms]
+[   669.6s]   batch 95 (step 1283) [103ms]
+[   672.7s]   batch 100 (step 1288) [796ms]
+[   674.8s]   batch 105 (step 1293) [172ms]
+[   677.4s]   batch 110 (step 1298) [80ms]
+[   678.8s] s1300/f0 G_fwd_det_done
+[   678.8s] s1300/f1 d_real=0.8461
+[   678.8s] s1300/f2 d_fake=0.1001
+[   678.8s] s1300/f3 d_loss=0.0015
+[   678.8s] s1300/f3b D_backward_done
+[   678.8s] s1300/f4 D_opt_done
+[   678.8s] s1300/f4b G_fwd_done (pretrain=false)
+[   678.8s] s1300/f5 g_recon=1.9313
+[   678.8s] s1300 g_tv=0.1690 g_conf=0.2116 g_sym=0.2342
+[   678.8s] s1300/f6 g_adv=0.2867
+[   679.0s]   batch 115 (step 1303) [72ms]
+[   683.6s]   batch 120 (step 1308) [2688ms]
+[   686.0s]   batch 125 (step 1313) [261ms]
+[   688.1s]   batch 130 (step 1318) [340ms]
+[   691.1s]   batch 135 (step 1323) [234ms]
+[   695.1s]   batch 140 (step 1328) [1431ms]
+[   697.6s]   batch 145 (step 1333) [191ms]
+[   700.4s]   batch 150 (step 1338) [110ms]
+[   702.8s]   batch 155 (step 1343) [164ms]
+[   708.4s]   batch 160 (step 1348) [2787ms]
+[   711.1s]   batch 165 (step 1353) [167ms]
+[   713.2s]   batch 170 (step 1358) [146ms]
+[   715.3s]   batch 175 (step 1363) [92ms]
+[   718.4s]   batch 180 (step 1368) [1144ms]
+[   720.0s]   batch 185 (step 1373) [103ms]
+[   722.6s]   batch 190 (step 1378) [135ms]
+[   724.4s]   batch 195 (step 1383) [208ms]
+[   728.0s]   batch 200 (step 1388) [1513ms]
+[   730.2s]   batch 205 (step 1393) [231ms]
+[   732.4s]   batch 210 (step 1398) [94ms]
+[   734.4s] Saving batch checkpoint (step 1400)…
+[   734.6s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   734.6s]   Batch checkpoint saved (step 1400)
+[   734.7s] s1400/f0 G_fwd_det_done
+[   734.7s] s1400/f1 d_real=0.8445
+[   734.7s] s1400/f2 d_fake=0.0630
+[   734.7s] s1400/f3 d_loss=0.0017
+[   734.7s] s1400/f4 D_opt_done
+[   734.7s] s1400/f4b G_fwd_done (pretrain=false)
+[   734.7s] s1400/f5 g_recon=1.8884
+[   734.7s] s1400 g_tv=0.2255 g_conf=0.2573 g_sym=0.1374
+[   734.7s] s1400/f6 g_adv=0.3099
+[   735.2s]   batch 215 (step 1403) [297ms]
+[   738.9s]   batch 220 (step 1408) [1338ms]
+[   740.8s]   batch 225 (step 1413) [178ms]
+[   743.4s]   batch 230 (step 1418) [116ms]
+[   744.9s]   batch 235 (step 1423) [88ms]
+[   747.8s]   batch 240 (step 1428) [1161ms]
+[   749.9s]   batch 245 (step 1433) [174ms]
+[   751.9s]   batch 250 (step 1438) [128ms]
+[   754.3s]   batch 255 (step 1443) [201ms]
+[   759.1s]   batch 260 (step 1448) [1616ms]
+[   762.4s]   batch 265 (step 1453) [378ms]
+[   765.4s]   batch 270 (step 1458) [266ms]
+[   768.5s]   batch 275 (step 1463) [79ms]
+[   772.8s]   batch 280 (step 1468) [1936ms]
+[   776.6s]   batch 285 (step 1473) [137ms]
+[   782.2s]   batch 290 (step 1478) [247ms]
+[   786.1s]   batch 295 (step 1483) [207ms]
+[   793.6s]   batch 300 (step 1488) [1801ms]
+[   800.8s]   batch 305 (step 1493) [719ms]
+[   804.4s]   batch 310 (step 1498) [1161ms]
+[   807.9s] s1500/f0 G_fwd_det_done
+[   807.9s] s1500/f1 d_real=0.8943
+[   807.9s] s1500/f2 d_fake=0.0619
+[   807.9s] s1500/f3 d_loss=0.0025
+[   807.9s] s1500/f4 D_opt_done
+[   808.0s] s1500/f4b G_fwd_done (pretrain=false)
+[   808.0s] s1500/f5 g_recon=1.8454
+[   808.0s] s1500 g_tv=0.2595 g_conf=0.2918 g_sym=0.1600
+[   808.0s] s1500/f6 g_adv=0.3112
+[   808.7s]   batch 315 (step 1503) [288ms]
+[   823.9s]   batch 320 (step 1508) [9882ms]
+[   827.0s]   batch 325 (step 1513) [55ms]
+[   831.1s]   batch 330 (step 1518) [591ms]
+[   834.4s]   batch 335 (step 1523) [101ms]
+[   840.6s]   batch 340 (step 1528) [2473ms]
+[   845.1s]   batch 345 (step 1533) [302ms]
+[   847.8s]   batch 350 (step 1538) [337ms]
+[   851.7s]   batch 355 (step 1543) [294ms]
+[   857.9s]   batch 360 (step 1548) [2349ms]
+[   860.9s]   batch 365 (step 1553) [285ms]
+[   863.4s]   batch 370 (step 1558) [512ms]
+[   866.4s]   batch 375 (step 1563) [142ms]
+[   872.2s]   batch 380 (step 1568) [1920ms]
+[   876.7s]   batch 385 (step 1573) [624ms]
+[   880.1s]   batch 390 (step 1578) [117ms]
+[   883.0s]   batch 395 (step 1583) [210ms]
+[   888.1s]   batch 400 (step 1588) [1597ms]
+[   891.5s]   batch 405 (step 1593) [94ms]
+[   894.8s]   batch 410 (step 1598) [66ms]
+[   897.0s] Saving batch checkpoint (step 1600)…
+[   897.2s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[   897.2s]   Batch checkpoint saved (step 1600)
+[   897.2s] s1600/f0 G_fwd_det_done
+[   897.2s] s1600/f1 d_real=0.8135
+[   897.2s] s1600/f2 d_fake=0.0254
+[   897.2s] s1600/f3 d_loss=0.0050
+[   897.2s] s1600/f4 D_opt_done
+[   897.5s] s1600/f4b G_fwd_done (pretrain=false)
+[   897.5s] s1600/f5 g_recon=2.2022
+[   897.5s] s1600 g_tv=0.2020 g_conf=0.1930 g_sym=0.1923
+[   897.5s] s1600/f6 g_adv=0.3402
+[   897.8s]   batch 415 (step 1603) [239ms]
+[   903.5s]   batch 420 (step 1608) [2957ms]
+[   906.4s]   batch 425 (step 1613) [163ms]
+[   908.0s]   batch 430 (step 1618) [83ms]
+[   910.3s]   batch 435 (step 1623) [166ms]
+[   915.7s]   batch 440 (step 1628) [2553ms]
+[   918.8s]   batch 445 (step 1633) [416ms]
+[   921.2s]   batch 450 (step 1638) [272ms]
+[   924.8s]   batch 455 (step 1643) [470ms]
+[   929.2s]   batch 460 (step 1648) [1814ms]
+[   932.1s]   batch 465 (step 1653) [167ms]
+[   935.3s]   batch 470 (step 1658) [90ms]
+[   937.7s]   batch 475 (step 1663) [91ms]
+[   942.3s]   batch 480 (step 1668) [2331ms]
+[   944.8s]   batch 485 (step 1673) [171ms]
+[   947.9s]   batch 490 (step 1678) [103ms]
+[   950.4s]   batch 495 (step 1683) [184ms]
+[   955.3s]   batch 500 (step 1688) [1960ms]
+[   958.7s]   batch 505 (step 1693) [228ms]
+[   961.1s]   batch 510 (step 1698) [253ms]
+[   964.0s] s1700/f0 G_fwd_det_done
+[   964.0s] s1700/f1 d_real=0.8400
+[   964.0s] s1700/f2 d_fake=0.0431
+[   964.0s] s1700/f3 d_loss=0.0023
+[   964.0s] s1700/f4 D_opt_done
+[   964.2s] s1700/f4b G_fwd_done (pretrain=false)
+[   964.2s] s1700/f5 g_recon=1.8007
+[   964.2s] s1700 g_tv=0.2429 g_conf=0.3005 g_sym=0.1059
+[   964.2s] s1700/f6 g_adv=0.3265
+[   964.4s]   batch 515 (step 1703) [114ms]
+[   970.3s]   batch 520 (step 1708) [2897ms]
+[   971.9s]   batch 525 (step 1713) [184ms]
+[   974.1s]   batch 530 (step 1718) [43ms]
+[   977.3s]   batch 535 (step 1723) [135ms]
+[   981.1s]   batch 540 (step 1728) [2312ms]
+[   982.6s]   batch 545 (step 1733) [112ms]
+[   985.6s]   batch 550 (step 1738) [251ms]
+[   988.2s]   batch 555 (step 1743) [184ms]
+[   992.9s]   batch 560 (step 1748) [1645ms]
+[   995.4s]   batch 565 (step 1753) [224ms]
+[   998.8s]   batch 570 (step 1758) [97ms]
+[  1001.1s]   batch 575 (step 1763) [176ms]
+[  1005.7s]   batch 580 (step 1768) [2239ms]
+[  1008.9s]   batch 585 (step 1773) [192ms]
+[  1011.4s]   batch 590 (step 1778) [146ms]
+[  1014.6s]   batch 595 (step 1783) [221ms]
+[  1020.1s]   batch 600 (step 1788) [2309ms]
+[  1022.9s]   batch 605 (step 1793) [229ms]
+[  1024.8s]   batch 610 (step 1798) [243ms]
+[  1026.9s] Saving batch checkpoint (step 1800)…
+[  1027.0s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1027.0s]   Batch checkpoint saved (step 1800)
+[  1027.1s] s1800/f0 G_fwd_det_done
+[  1027.1s] s1800/f1 d_real=0.8432
+[  1027.1s] s1800/f2 d_fake=0.0528
+[  1027.1s] s1800/f3 d_loss=0.0017
+[  1027.1s] s1800/f4 D_opt_done
+[  1027.2s] s1800/f4b G_fwd_done (pretrain=false)
+[  1027.2s] s1800/f5 g_recon=1.8494
+[  1027.2s] s1800 g_tv=0.2831 g_conf=0.2622 g_sym=0.1530
+[  1027.2s] s1800/f6 g_adv=0.3181
+[  1027.6s]   batch 615 (step 1803) [161ms]
+[  1032.2s]   batch 620 (step 1808) [1341ms]
+[  1035.3s]   batch 625 (step 1813) [312ms]
+[  1037.6s]   batch 630 (step 1818) [190ms]
+[  1040.1s]   batch 635 (step 1823) [99ms]
+[  1045.2s]   batch 640 (step 1828) [2013ms]
+[  1047.5s]   batch 645 (step 1833) [120ms]
+[  1049.9s]   batch 650 (step 1838) [152ms]
+[  1052.6s]   batch 655 (step 1843) [259ms]
+[  1056.9s]   batch 660 (step 1848) [1373ms]
+[  1059.3s]   batch 665 (step 1853) [116ms]
+[  1062.3s]   batch 670 (step 1858) [50ms]
+[  1063.7s]   batch 675 (step 1863) [243ms]
+[  1067.6s]   batch 680 (step 1868) [2043ms]
+[  1070.3s]   batch 685 (step 1873) [374ms]
+[  1073.2s]   batch 690 (step 1878) [100ms]
+[  1076.1s]   batch 695 (step 1883) [164ms]
+[  1079.4s]   batch 700 (step 1888) [1754ms]
+[  1082.5s]   batch 705 (step 1893) [190ms]
+[  1084.9s]   batch 710 (step 1898) [96ms]
+[  1086.5s] s1900/f0 G_fwd_det_done
+[  1086.5s] s1900/f1 d_real=0.8766
+[  1086.5s] s1900/f2 d_fake=0.0599
+[  1086.5s] s1900/f3 d_loss=0.0021
+[  1086.5s] s1900/f4 D_opt_done
+[  1086.5s] s1900/f4b G_fwd_done (pretrain=false)
+[  1086.5s] s1900/f5 g_recon=2.1050
+[  1086.5s] s1900 g_tv=0.2178 g_conf=0.1954 g_sym=0.2240
+[  1086.6s] s1900/f6 g_adv=0.3129
+[  1086.9s]   batch 715 (step 1903) [80ms]
+[  1090.9s]   batch 720 (step 1908) [1803ms]
+[  1093.0s]   batch 725 (step 1913) [125ms]
+[  1095.7s]   batch 730 (step 1918) [92ms]
+[  1097.9s]   batch 735 (step 1923) [217ms]
+[  1101.6s]   batch 740 (step 1928) [1726ms]
+[  1104.9s]   batch 745 (step 1933) [244ms]
+[  1107.3s]   batch 750 (step 1938) [45ms]
+[  1110.4s]   batch 755 (step 1943) [237ms]
+[  1115.6s]   batch 760 (step 1948) [2533ms]
+[  1118.8s]   batch 765 (step 1953) [253ms]
+[  1121.4s]   batch 770 (step 1958) [92ms]
+[  1123.9s]   batch 775 (step 1963) [204ms]
+[  1127.4s]   batch 780 (step 1968) [1474ms]
+[  1129.6s]   batch 785 (step 1973) [265ms]
+[  1132.1s]   batch 790 (step 1978) [201ms]
+[  1135.1s]   batch 795 (step 1983) [247ms]
+[  1139.3s]   batch 800 (step 1988) [1719ms]
+[  1142.3s]   batch 805 (step 1993) [157ms]
+[  1145.0s]   batch 810 (step 1998) [49ms]
+[  1147.0s] Saving batch checkpoint (step 2000)…
+[  1147.1s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1147.1s]   Batch checkpoint saved (step 2000)
+[  1147.2s] s2000/f0 G_fwd_det_done
+[  1147.2s] s2000/f1 d_real=0.8408
+[  1147.2s] s2000/f2 d_fake=0.1080
+[  1147.2s] s2000/f3 d_loss=0.0010
+[  1147.2s] s2000/f3b D_backward_done
+[  1147.2s] s2000/f4 D_opt_done
+[  1147.3s] s2000/f4b G_fwd_done (pretrain=false)
+[  1147.3s] s2000/f5 g_recon=1.8059
+[  1147.3s] s2000 g_tv=0.2610 g_conf=0.2343 g_sym=0.1110
+[  1147.3s] s2000/f6 g_adv=0.2874
+[  1147.8s]   batch 815 (step 2003) [269ms]
+[  1151.8s]   batch 820 (step 2008) [1363ms]
+[  1153.9s]   batch 825 (step 2013) [102ms]
+[  1156.4s]   batch 830 (step 2018) [116ms]
+[  1159.4s]   batch 835 (step 2023) [91ms]
+[  1164.6s]   batch 840 (step 2028) [1811ms]
+[  1167.6s]   batch 845 (step 2033) [250ms]
+[  1169.3s]   batch 850 (step 2038) [231ms]
+[  1171.7s]   batch 855 (step 2043) [192ms]
+[  1176.0s]   batch 860 (step 2048) [1911ms]
+[  1178.4s]   batch 865 (step 2053) [88ms]
+[  1182.2s]   batch 870 (step 2058) [151ms]
+[  1184.5s]   batch 875 (step 2063) [86ms]
+[  1188.4s]   batch 880 (step 2068) [1979ms]
+[  1190.8s]   batch 885 (step 2073) [99ms]
+[  1193.6s]   batch 890 (step 2078) [322ms]
+[  1196.2s]   batch 895 (step 2083) [213ms]
+[  1202.1s]   batch 900 (step 2088) [2133ms]
+[  1205.1s]   batch 905 (step 2093) [222ms]
+[  1207.0s]   batch 910 (step 2098) [267ms]
+[  1209.6s] s2100/f0 G_fwd_det_done
+[  1209.6s] s2100/f1 d_real=0.8605
+[  1209.6s] s2100/f2 d_fake=0.0878
+[  1209.6s] s2100/f3 d_loss=0.0006
+[  1209.6s] s2100/f4 D_opt_done
+[  1209.8s] s2100/f4b G_fwd_done (pretrain=false)
+[  1209.8s] s2100/f5 g_recon=1.8205
+[  1209.8s] s2100 g_tv=0.2898 g_conf=0.2619 g_sym=0.1468
+[  1209.8s] s2100/f6 g_adv=0.2910
+[  1210.1s]   batch 915 (step 2103) [238ms]
+[  1214.4s]   batch 920 (step 2108) [1906ms]
+[  1217.4s]   batch 925 (step 2113) [214ms]
+[  1220.5s]   batch 930 (step 2118) [66ms]
+[  1223.9s]   batch 935 (step 2123) [167ms]
+[  1229.0s]   batch 940 (step 2128) [2400ms]
+[  1232.0s]   batch 945 (step 2133) [163ms]
+[  1235.1s]   batch 950 (step 2138) [93ms]
+[  1237.4s]   batch 955 (step 2143) [134ms]
+[  1242.4s]   batch 960 (step 2148) [2169ms]
+[  1244.2s]   batch 965 (step 2153) [111ms]
+[  1246.9s]   batch 970 (step 2158) [109ms]
+[  1249.0s]   batch 975 (step 2163) [87ms]
+[  1253.0s]   batch 980 (step 2168) [1852ms]
+[  1255.3s]   batch 985 (step 2173) [210ms]
+[  1257.2s]   batch 990 (step 2178) [284ms]
+[  1259.8s]   batch 995 (step 2183) [134ms]
+[  1264.9s]   batch 1000 (step 2188) [2237ms]
+[  1268.2s]   batch 1005 (step 2193) [227ms]
+[  1271.3s]   batch 1010 (step 2198) [293ms]
+[  1273.5s] Saving batch checkpoint (step 2200)…
+[  1273.7s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1273.7s]   Batch checkpoint saved (step 2200)
+[  1273.8s] s2200/f0 G_fwd_det_done
+[  1273.8s] s2200/f1 d_real=0.8264
+[  1273.8s] s2200/f2 d_fake=0.0430
+[  1273.8s] s2200/f3 d_loss=0.0026
+[  1273.8s] s2200/f4 D_opt_done
+[  1273.9s] s2200/f4b G_fwd_done (pretrain=false)
+[  1273.9s] s2200/f5 g_recon=2.3726
+[  1273.9s] s2200 g_tv=0.3188 g_conf=0.2774 g_sym=0.1771
+[  1273.9s] s2200/f6 g_adv=0.3254
+[  1274.1s]   batch 1015 (step 2203) [134ms]
+[  1278.4s]   batch 1020 (step 2208) [1957ms]
+[  1281.4s]   batch 1025 (step 2213) [104ms]
+[  1283.4s]   batch 1030 (step 2218) [146ms]
+[  1285.4s]   batch 1035 (step 2223) [229ms]
+[  1289.8s]   batch 1040 (step 2228) [1928ms]
+[  1292.5s]   batch 1045 (step 2233) [132ms]
+[  1295.5s]   batch 1050 (step 2238) [152ms]
+[  1297.8s]   batch 1055 (step 2243) [256ms]
+[  1302.7s]   batch 1060 (step 2248) [1898ms]
+[  1305.5s]   batch 1065 (step 2253) [101ms]
+[  1308.7s]   batch 1070 (step 2258) [234ms]
+[  1311.8s]   batch 1075 (step 2263) [131ms]
+[  1316.3s]   batch 1080 (step 2268) [1900ms]
+[  1319.1s]   batch 1085 (step 2273) [205ms]
+[  1322.0s]   batch 1090 (step 2278) [235ms]
+[  1325.1s]   batch 1095 (step 2283) [225ms]
+[  1329.8s]   batch 1100 (step 2288) [1956ms]
+[  1332.4s]   batch 1105 (step 2293) [140ms]
+[  1335.6s]   batch 1110 (step 2298) [240ms]
+[  1337.5s] s2300/f0 G_fwd_det_done
+[  1337.5s] s2300/f1 d_real=0.8277
+[  1337.5s] s2300/f2 d_fake=0.0246
+[  1337.5s] s2300/f3 d_loss=0.0037
+[  1337.5s] s2300/f4 D_opt_done
+[  1337.5s] s2300/f4b G_fwd_done (pretrain=false)
+[  1337.5s] s2300/f5 g_recon=2.0218
+[  1337.5s] s2300 g_tv=0.2996 g_conf=0.2475 g_sym=0.1900
+[  1337.5s] s2300/f6 g_adv=0.3404
+[  1337.9s]   batch 1115 (step 2303) [152ms]
+[  1341.8s]   batch 1120 (step 2308) [1277ms]
+[  1344.9s]   batch 1125 (step 2313) [264ms]
+[  1348.0s]   batch 1130 (step 2318) [392ms]
+[  1351.0s]   batch 1135 (step 2323) [291ms]
+[  1354.2s]   batch 1140 (step 2328) [1070ms]
+[  1356.3s]   batch 1145 (step 2333) [106ms]
+[  1359.2s]   batch 1150 (step 2338) [310ms]
+[  1362.4s]   batch 1155 (step 2343) [145ms]
+[  1366.9s]   batch 1160 (step 2348) [2291ms]
+[  1369.4s]   batch 1165 (step 2353) [63ms]
+[  1371.8s]   batch 1170 (step 2358) [40ms]
+[  1373.9s]   batch 1175 (step 2363) [228ms]
+[  1379.1s]   batch 1180 (step 2368) [1878ms]
+[  1381.9s]   batch 1185 (step 2373) [67ms]
+[  1384.0s] Validating (epoch 2)…
+[  1384.5s] EPOCH 2: IoU=0.1075 Dice=0.1855 Prec=0.1168 Rec=0.6999
+[  1384.5s] Building sample grid…
+[  1385.6s] Epoch 2/100: IoU=0.1075  Dice=0.1855  Prec=0.1168  Rec=0.6999
+[  1387.9s]   batch 5 (step 2381) [226ms]
+[  1390.7s]   batch 10 (step 2386) [283ms]
+[  1392.7s]   batch 15 (step 2391) [239ms]
+[  1396.8s]   batch 20 (step 2396) [1985ms]
+[  1398.7s] Saving batch checkpoint (step 2400)…
+[  1398.9s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1398.9s]   Batch checkpoint saved (step 2400)
+[  1399.0s] s2400/f0 G_fwd_det_done
+[  1399.0s] s2400/f1 d_real=0.8147
+[  1399.0s] s2400/f2 d_fake=0.0610
+[  1399.0s] s2400/f3 d_loss=0.0021
+[  1399.0s] s2400/f4 D_opt_done
+[  1399.0s] s2400/f4b G_fwd_done (pretrain=false)
+[  1399.0s] s2400/f5 g_recon=1.8485
+[  1399.0s] s2400 g_tv=0.2713 g_conf=0.2320 g_sym=0.2473
+[  1399.0s] s2400/f6 g_adv=0.3114
+[  1399.0s]   batch 25 (step 2401) [114ms]
+[  1401.7s]   batch 30 (step 2406) [250ms]
+[  1404.5s]   batch 35 (step 2411) [110ms]
+[  1408.4s]   batch 40 (step 2416) [2060ms]
+[  1411.2s]   batch 45 (step 2421) [100ms]
+[  1414.1s]   batch 50 (step 2426) [127ms]
+[  1416.7s]   batch 55 (step 2431) [158ms]
+[  1422.4s]   batch 60 (step 2436) [2725ms]
+[  1425.1s]   batch 65 (step 2441) [150ms]
+[  1427.4s]   batch 70 (step 2446) [151ms]
+[  1429.6s]   batch 75 (step 2451) [70ms]
+[  1434.1s]   batch 80 (step 2456) [2002ms]
+[  1437.0s]   batch 85 (step 2461) [199ms]
+[  1441.2s]   batch 90 (step 2466) [150ms]
+[  1443.7s]   batch 95 (step 2471) [154ms]
+[  1448.2s]   batch 100 (step 2476) [1518ms]
+[  1451.4s]   batch 105 (step 2481) [294ms]
+[  1454.5s]   batch 110 (step 2486) [254ms]
+[  1457.2s]   batch 115 (step 2491) [209ms]
+[  1461.0s]   batch 120 (step 2496) [1699ms]
+[  1463.7s] s2500/f0 G_fwd_det_done
+[  1463.7s] s2500/f1 d_real=0.8343
+[  1463.7s] s2500/f2 d_fake=0.0622
+[  1463.7s] s2500/f3 d_loss=0.0015
+[  1463.7s] s2500/f4 D_opt_done
+[  1463.8s] s2500/f4b G_fwd_done (pretrain=false)
+[  1463.8s] s2500/f5 g_recon=1.8529
+[  1463.8s] s2500 g_tv=0.2778 g_conf=0.2184 g_sym=0.1449
+[  1463.9s] s2500/f6 g_adv=0.3104
+[  1463.9s]   batch 125 (step 2501) [245ms]
+[  1466.9s]   batch 130 (step 2506) [316ms]
+[  1469.5s]   batch 135 (step 2511) [110ms]
+[  1474.7s]   batch 140 (step 2516) [1852ms]
+[  1477.5s]   batch 145 (step 2521) [222ms]
+[  1479.0s]   batch 150 (step 2526) [185ms]
+[  1481.7s]   batch 155 (step 2531) [241ms]
+[  1486.2s]   batch 160 (step 2536) [2283ms]
+[  1489.4s]   batch 165 (step 2541) [165ms]
+[  1492.0s]   batch 170 (step 2546) [120ms]
+[  1494.8s]   batch 175 (step 2551) [314ms]
+[  1499.7s]   batch 180 (step 2556) [2342ms]
+[  1501.9s]   batch 185 (step 2561) [120ms]
+[  1504.3s]   batch 190 (step 2566) [208ms]
+[  1507.0s]   batch 195 (step 2571) [285ms]
+[  1511.6s]   batch 200 (step 2576) [1759ms]
+[  1514.2s]   batch 205 (step 2581) [364ms]
+[  1517.2s]   batch 210 (step 2586) [109ms]
+[  1519.6s]   batch 215 (step 2591) [171ms]
+[  1524.8s]   batch 220 (step 2596) [2213ms]
+[  1527.7s] Saving batch checkpoint (step 2600)…
+[  1527.9s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1527.9s]   Batch checkpoint saved (step 2600)
+[  1527.9s] s2600/f0 G_fwd_det_done
+[  1528.0s] s2600/f1 d_real=0.8264
+[  1528.0s] s2600/f2 d_fake=0.0469
+[  1528.0s] s2600/f3 d_loss=0.0023
+[  1528.0s] s2600/f4 D_opt_done
+[  1528.2s] s2600/f4b G_fwd_done (pretrain=false)
+[  1528.2s] s2600/f5 g_recon=1.8257
+[  1528.2s] s2600 g_tv=0.3118 g_conf=0.2375 g_sym=0.1292
+[  1528.2s] s2600/f6 g_adv=0.3232
+[  1528.2s]   batch 225 (step 2601) [319ms]
+[  1530.9s]   batch 230 (step 2606) [102ms]
+[  1534.2s]   batch 235 (step 2611) [158ms]
+[  1538.7s]   batch 240 (step 2616) [2199ms]
+[  1541.9s]   batch 245 (step 2621) [146ms]
+[  1545.0s]   batch 250 (step 2626) [264ms]
+[  1547.2s]   batch 255 (step 2631) [258ms]
+[  1552.6s]   batch 260 (step 2636) [2120ms]
+[  1555.1s]   batch 265 (step 2641) [331ms]
+[  1558.3s]   batch 270 (step 2646) [84ms]
+[  1561.2s]   batch 275 (step 2651) [261ms]
+[  1566.0s]   batch 280 (step 2656) [1622ms]
+[  1568.5s]   batch 285 (step 2661) [330ms]
+[  1574.1s]   batch 290 (step 2666) [39ms]
+[  1574.1s]   batch 295 (step 2671) [153ms]
+[  1578.3s]   batch 300 (step 2676) [1699ms]
+[  1581.4s]   batch 305 (step 2681) [246ms]
+[  1583.5s]   batch 310 (step 2686) [216ms]
+[  1585.7s]   batch 315 (step 2691) [74ms]
+[  1588.9s]   batch 320 (step 2696) [1746ms]
+[  1590.6s] s2700/f0 G_fwd_det_done
+[  1590.6s] s2700/f1 d_real=0.8522
+[  1590.6s] s2700/f2 d_fake=0.0731
+[  1590.6s] s2700/f3 d_loss=0.0007
+[  1590.6s] s2700/f4 D_opt_done
+[  1590.7s] s2700/f4b G_fwd_done (pretrain=false)
+[  1590.7s] s2700/f5 g_recon=1.7281
+[  1590.7s] s2700 g_tv=0.3374 g_conf=0.2868 g_sym=0.1819
+[  1590.7s] s2700/f6 g_adv=0.3012
+[  1590.7s]   batch 325 (step 2701) [154ms]
+[  1593.4s]   batch 330 (step 2706) [223ms]
+[  1596.2s]   batch 335 (step 2711) [120ms]
+[  1599.9s]   batch 340 (step 2716) [2008ms]
+[  1602.5s]   batch 345 (step 2721) [178ms]
+[  1603.8s]   batch 350 (step 2726) [84ms]
+[  1605.1s]   batch 355 (step 2731) [102ms]
+[  1609.7s]   batch 360 (step 2736) [2383ms]
+[  1613.2s]   batch 365 (step 2741) [189ms]
+[  1616.4s]   batch 370 (step 2746) [108ms]
+[  1618.8s]   batch 375 (step 2751) [224ms]
+[  1623.5s]   batch 380 (step 2756) [2376ms]
+[  1626.2s]   batch 385 (step 2761) [374ms]
+[  1628.9s]   batch 390 (step 2766) [202ms]
+[  1631.7s]   batch 395 (step 2771) [189ms]
+[  1636.6s]   batch 400 (step 2776) [2338ms]
+[  1639.7s]   batch 405 (step 2781) [161ms]
+[  1642.6s]   batch 410 (step 2786) [88ms]
+[  1645.3s]   batch 415 (step 2791) [116ms]
+[  1649.1s]   batch 420 (step 2796) [1888ms]
+[  1652.0s] Saving batch checkpoint (step 2800)…
+[  1652.2s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1652.2s]   Batch checkpoint saved (step 2800)
+[  1652.3s] s2800/f0 G_fwd_det_done
+[  1652.3s] s2800/f1 d_real=0.8435
+[  1652.3s] s2800/f2 d_fake=0.0677
+[  1652.3s] s2800/f3 d_loss=0.0009
+[  1652.3s] s2800/f4 D_opt_done
+[  1652.4s] s2800/f4b G_fwd_done (pretrain=false)
+[  1652.4s] s2800/f5 g_recon=1.8119
+[  1652.4s] s2800 g_tv=0.3495 g_conf=0.2631 g_sym=0.2062
+[  1652.4s] s2800/f6 g_adv=0.3067
+[  1652.4s]   batch 425 (step 2801) [155ms]
+[  1655.8s]   batch 430 (step 2806) [136ms]
+[  1659.4s]   batch 435 (step 2811) [219ms]
+[  1663.6s]   batch 440 (step 2816) [1660ms]
+[  1666.7s]   batch 445 (step 2821) [281ms]
+[  1670.0s]   batch 450 (step 2826) [344ms]
+[  1672.4s]   batch 455 (step 2831) [118ms]
+[  1676.5s]   batch 460 (step 2836) [1965ms]
+[  1679.8s]   batch 465 (step 2841) [245ms]
+[  1682.8s]   batch 470 (step 2846) [146ms]
+[  1686.2s]   batch 475 (step 2851) [260ms]
+[  1691.3s]   batch 480 (step 2856) [2306ms]
+[  1693.2s]   batch 485 (step 2861) [120ms]
+[  1696.1s]   batch 490 (step 2866) [235ms]
+[  1698.3s]   batch 495 (step 2871) [63ms]
+[  1702.4s]   batch 500 (step 2876) [1447ms]
+[  1705.3s]   batch 505 (step 2881) [363ms]
+[  1708.1s]   batch 510 (step 2886) [346ms]
+[  1710.6s]   batch 515 (step 2891) [141ms]
+[  1715.1s]   batch 520 (step 2896) [2505ms]
+[  1717.2s] s2900/f0 G_fwd_det_done
+[  1717.2s] s2900/f1 d_real=0.8436
+[  1717.2s] s2900/f2 d_fake=0.0683
+[  1717.2s] s2900/f3 d_loss=0.0010
+[  1717.2s] s2900/f4 D_opt_done
+[  1717.3s] s2900/f4b G_fwd_done (pretrain=false)
+[  1717.3s] s2900/f5 g_recon=1.8151
+[  1717.3s] s2900 g_tv=0.3081 g_conf=0.2515 g_sym=0.2015
+[  1717.3s] s2900/f6 g_adv=0.3055
+[  1717.3s]   batch 525 (step 2901) [175ms]
+[  1719.9s]   batch 530 (step 2906) [192ms]
+[  1722.7s]   batch 535 (step 2911) [205ms]
+[  1727.3s]   batch 540 (step 2916) [2056ms]
+[  1730.6s]   batch 545 (step 2921) [267ms]
+[  1733.2s]   batch 550 (step 2926) [380ms]
+[  1735.9s]   batch 555 (step 2931) [160ms]
+[  1739.4s]   batch 560 (step 2936) [1504ms]
+[  1741.7s]   batch 565 (step 2941) [112ms]
+[  1744.7s]   batch 570 (step 2946) [61ms]
+[  1747.1s]   batch 575 (step 2951) [205ms]
+[  1752.5s]   batch 580 (step 2956) [1292ms]
+[  1753.5s]   batch 585 (step 2961) [154ms]
+[  1756.9s]   batch 590 (step 2966) [79ms]
+[  1759.7s]   batch 595 (step 2971) [245ms]
+[  1764.1s]   batch 600 (step 2976) [1958ms]
+[  1766.5s]   batch 605 (step 2981) [151ms]
+[  1769.1s]   batch 610 (step 2986) [94ms]
+[  1771.3s]   batch 615 (step 2991) [279ms]
+[  1776.3s]   batch 620 (step 2996) [2351ms]
+[  1778.9s] Saving batch checkpoint (step 3000)…
+[  1779.1s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1779.1s]   Batch checkpoint saved (step 3000)
+[  1779.2s] s3000/f0 G_fwd_det_done
+[  1779.2s] s3000/f1 d_real=0.8618
+[  1779.2s] s3000/f2 d_fake=0.0576
+[  1779.2s] s3000/f3 d_loss=0.0015
+[  1779.2s] s3000/f4 D_opt_done
+[  1779.2s] s3000/f4b G_fwd_done (pretrain=false)
+[  1779.2s] s3000/f5 g_recon=1.9733
+[  1779.2s] s3000 g_tv=0.2902 g_conf=0.2465 g_sym=0.1870
+[  1779.2s] s3000/f6 g_adv=0.3150
+[  1779.2s]   batch 625 (step 3001) [164ms]
+[  1782.5s]   batch 630 (step 3006) [83ms]
+[  1784.6s]   batch 635 (step 3011) [93ms]
+[  1788.1s]   batch 640 (step 3016) [1461ms]
+[  1791.9s]   batch 645 (step 3021) [189ms]
+[  1794.1s]   batch 650 (step 3026) [55ms]
+[  1796.2s]   batch 655 (step 3031) [99ms]
+[  1800.5s]   batch 660 (step 3036) [2292ms]
+[  1803.7s]   batch 665 (step 3041) [217ms]
+[  1806.5s]   batch 670 (step 3046) [128ms]
+[  1809.1s]   batch 675 (step 3051) [211ms]
+[  1813.9s]   batch 680 (step 3056) [2298ms]
+[  1816.8s]   batch 685 (step 3061) [195ms]
+[  1819.3s]   batch 690 (step 3066) [255ms]
+[  1821.8s]   batch 695 (step 3071) [232ms]
+[  1826.7s]   batch 700 (step 3076) [2232ms]
+[  1829.2s]   batch 705 (step 3081) [181ms]
+[  1832.7s]   batch 710 (step 3086) [141ms]
+[  1835.7s]   batch 715 (step 3091) [226ms]
+[  1840.4s]   batch 720 (step 3096) [2537ms]
+[  1842.9s] s3100/f0 G_fwd_det_done
+[  1842.9s] s3100/f1 d_real=0.8120
+[  1842.9s] s3100/f2 d_fake=0.0879
+[  1842.9s] s3100/f3 d_loss=0.0022
+[  1842.9s] s3100/f4 D_opt_done
+[  1843.0s] s3100/f4b G_fwd_done (pretrain=false)
+[  1843.0s] s3100/f5 g_recon=1.8142
+[  1843.0s] s3100 g_tv=0.2560 g_conf=0.1916 g_sym=0.1795
+[  1843.0s] s3100/f6 g_adv=0.2910
+[  1843.0s]   batch 725 (step 3101) [229ms]
+[  1844.6s]   batch 730 (step 3106) [257ms]
+[  1847.7s]   batch 735 (step 3111) [237ms]
+[  1852.7s]   batch 740 (step 3116) [1864ms]
+[  1856.2s]   batch 745 (step 3121) [373ms]
+[  1859.1s]   batch 750 (step 3126) [375ms]
+[  1861.3s]   batch 755 (step 3131) [143ms]
+[  1865.4s]   batch 760 (step 3136) [1716ms]
+[  1868.6s]   batch 765 (step 3141) [231ms]
+[  1871.4s]   batch 770 (step 3146) [213ms]
+[  1873.7s]   batch 775 (step 3151) [217ms]
+[  1879.5s]   batch 780 (step 3156) [2808ms]
+[  1882.9s]   batch 785 (step 3161) [96ms]
+[  1885.0s]   batch 790 (step 3166) [175ms]
+[  1887.6s]   batch 795 (step 3171) [124ms]
+[  1891.8s]   batch 800 (step 3176) [1615ms]
+[  1895.8s]   batch 805 (step 3181) [220ms]
+[  1898.3s]   batch 810 (step 3186) [46ms]
+[  1900.2s]   batch 815 (step 3191) [114ms]
+[  1905.0s]   batch 820 (step 3196) [1973ms]
+[  1907.6s] Saving batch checkpoint (step 3200)…
+[  1907.7s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  1907.7s]   Batch checkpoint saved (step 3200)
+[  1907.9s] s3200/f0 G_fwd_det_done
+[  1907.9s] s3200/f1 d_real=0.8528
+[  1907.9s] s3200/f2 d_fake=0.1050
+[  1907.9s] s3200/f3 d_loss=0.0005
+[  1908.0s] s3200/f3b D_backward_done
+[  1908.0s] s3200/f4 D_opt_done
+[  1908.0s] s3200/f4b G_fwd_done (pretrain=false)
+[  1908.0s] s3200/f5 g_recon=1.7074
+[  1908.0s] s3200 g_tv=0.3573 g_conf=0.2649 g_sym=0.2439
+[  1908.0s] s3200/f6 g_adv=0.2960
+[  1908.0s]   batch 825 (step 3201) [271ms]
+[  1910.9s]   batch 830 (step 3206) [220ms]
+[  1914.3s]   batch 835 (step 3211) [213ms]
+[  1918.8s]   batch 840 (step 3216) [1898ms]
+[  1922.1s]   batch 845 (step 3221) [211ms]
+[  1925.2s]   batch 850 (step 3226) [256ms]
+[  1928.2s]   batch 855 (step 3231) [156ms]
+[  1932.6s]   batch 860 (step 3236) [1563ms]
+[  1934.3s]   batch 865 (step 3241) [216ms]
+[  1936.5s]   batch 870 (step 3246) [236ms]
+[  1939.1s]   batch 875 (step 3251) [152ms]
+[  1945.2s]   batch 880 (step 3256) [2201ms]
+[  1947.6s]   batch 885 (step 3261) [156ms]
+[  1950.1s]   batch 890 (step 3266) [182ms]
+[  1953.5s]   batch 895 (step 3271) [159ms]
+[  1956.3s]   batch 900 (step 3276) [1209ms]
+[  1959.2s]   batch 905 (step 3281) [305ms]
+[  1961.9s]   batch 910 (step 3286) [195ms]
+[  1964.0s]   batch 915 (step 3291) [104ms]
+[  1968.9s]   batch 920 (step 3296) [2297ms]
+[  1972.4s] s3300/f0 G_fwd_det_done
+[  1972.4s] s3300/f1 d_real=0.8609
+[  1972.4s] s3300/f2 d_fake=0.1206
+[  1972.4s] s3300/f3 d_loss=0.0008
+[  1972.4s] s3300/f3b D_backward_done
+[  1972.4s] s3300/f4 D_opt_done
+[  1972.5s] s3300/f4b G_fwd_done (pretrain=false)
+[  1972.5s] s3300/f5 g_recon=1.9036
+[  1972.5s] s3300 g_tv=0.3125 g_conf=0.2373 g_sym=0.1754
+[  1972.5s] s3300/f6 g_adv=0.3054
+[  1972.5s]   batch 925 (step 3301) [182ms]
+[  1974.9s]   batch 930 (step 3306) [316ms]
+[  1977.3s]   batch 935 (step 3311) [163ms]
+[  1980.9s]   batch 940 (step 3316) [1793ms]
+[  1983.6s]   batch 945 (step 3321) [143ms]
+[  1986.6s]   batch 950 (step 3326) [81ms]
+[  1989.5s]   batch 955 (step 3331) [210ms]
+[  1993.5s]   batch 960 (step 3336) [1711ms]
+[  1996.3s]   batch 965 (step 3341) [207ms]
+[  1999.1s]   batch 970 (step 3346) [37ms]
+[  2001.2s]   batch 975 (step 3351) [128ms]
+[  2005.3s]   batch 980 (step 3356) [1764ms]
+[  2006.8s]   batch 985 (step 3361) [98ms]
+[  2009.1s]   batch 990 (step 3366) [356ms]
+[  2011.5s]   batch 995 (step 3371) [200ms]
+[  2016.8s]   batch 1000 (step 3376) [2359ms]
+[  2018.9s]   batch 1005 (step 3381) [157ms]
+[  2022.0s]   batch 1010 (step 3386) [59ms]
+[  2024.3s]   batch 1015 (step 3391) [217ms]
+[  2030.3s]   batch 1020 (step 3396) [2603ms]
+[  2032.2s] Saving batch checkpoint (step 3400)…
+[  2032.4s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  2032.4s]   Batch checkpoint saved (step 3400)
+[  2032.4s] s3400/f0 G_fwd_det_done
+[  2032.5s] s3400/f1 d_real=0.8484
+[  2032.5s] s3400/f2 d_fake=0.0618
+[  2032.5s] s3400/f3 d_loss=0.0015
+[  2032.5s] s3400/f4 D_opt_done
+[  2032.5s] s3400/f4b G_fwd_done (pretrain=false)
+[  2032.5s] s3400/f5 g_recon=1.6671
+[  2032.5s] s3400 g_tv=0.3127 g_conf=0.2315 g_sym=0.2128
+[  2032.5s] s3400/f6 g_adv=0.3116
+[  2032.5s]   batch 1025 (step 3401) [159ms]
+[  2035.3s]   batch 1030 (step 3406) [227ms]
+[  2038.8s]   batch 1035 (step 3411) [267ms]
+[  2043.0s]   batch 1040 (step 3416) [2004ms]
+[  2045.3s]   batch 1045 (step 3421) [183ms]
+[  2047.9s]   batch 1050 (step 3426) [65ms]
+[  2049.6s]   batch 1055 (step 3431) [103ms]
+[  2054.5s]   batch 1060 (step 3436) [2514ms]
+[  2057.2s]   batch 1065 (step 3441) [94ms]
+[  2059.8s]   batch 1070 (step 3446) [66ms]
+[  2061.7s]   batch 1075 (step 3451) [146ms]
+[  2066.1s]   batch 1080 (step 3456) [1937ms]
+[  2068.8s]   batch 1085 (step 3461) [134ms]
+[  2071.5s]   batch 1090 (step 3466) [202ms]
+[  2074.6s]   batch 1095 (step 3471) [294ms]
+[  2078.6s]   batch 1100 (step 3476) [1331ms]
+[  2081.3s]   batch 1105 (step 3481) [221ms]
+[  2084.0s]   batch 1110 (step 3486) [148ms]
+[  2087.7s]   batch 1115 (step 3491) [168ms]
+[  2091.3s]   batch 1120 (step 3496) [1547ms]
+[  2093.4s] s3500/f0 G_fwd_det_done
+[  2093.4s] s3500/f1 d_real=0.8361
+[  2093.4s] s3500/f2 d_fake=0.0230
+[  2093.4s] s3500/f3 d_loss=0.0037
+[  2093.4s] s3500/f4 D_opt_done
+[  2093.5s] s3500/f4b G_fwd_done (pretrain=false)
+[  2093.5s] s3500/f5 g_recon=1.7995
+[  2093.5s] s3500 g_tv=0.3241 g_conf=0.2153 g_sym=0.1804
+[  2093.5s] s3500/f6 g_adv=0.3417
+[  2093.5s]   batch 1125 (step 3501) [117ms]
+[  2096.9s]   batch 1130 (step 3506) [66ms]
+[  2099.1s]   batch 1135 (step 3511) [102ms]
+[  2104.2s]   batch 1140 (step 3516) [2468ms]
+[  2107.3s]   batch 1145 (step 3521) [294ms]
+[  2109.9s]   batch 1150 (step 3526) [121ms]
+[  2112.5s]   batch 1155 (step 3531) [125ms]
+[  2118.1s]   batch 1160 (step 3536) [2519ms]
+[  2120.8s]   batch 1165 (step 3541) [142ms]
+[  2123.2s]   batch 1170 (step 3546) [196ms]
+[  2125.8s]   batch 1175 (step 3551) [221ms]
+[  2131.5s]   batch 1180 (step 3556) [2321ms]
+[  2134.0s]   batch 1185 (step 3561) [225ms]
+[  2136.7s] Validating (epoch 3)…
+[  2137.4s] EPOCH 3: IoU=0.1144 Dice=0.1957 Prec=0.1258 Rec=0.6830
+[  2137.4s] Building sample grid…
+[  2139.1s] Epoch 3/100: IoU=0.1144  Dice=0.1957  Prec=0.1258  Rec=0.6830
+[  2139.1s] Saving checkpoint: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_best
+[  2139.3s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_best
+[  2139.3s]   Checkpoint saved.
+[  2142.6s]   batch 5 (step 3569) [207ms]
+[  2144.3s]   batch 10 (step 3574) [70ms]
+[  2146.9s]   batch 15 (step 3579) [183ms]
+[  2151.3s]   batch 20 (step 3584) [2101ms]
+[  2154.0s]   batch 25 (step 3589) [248ms]
+[  2156.5s]   batch 30 (step 3594) [210ms]
+[  2158.7s]   batch 35 (step 3599) [201ms]
+[  2160.9s] Saving batch checkpoint (step 3600)…
+[  2161.1s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  2161.1s]   Batch checkpoint saved (step 3600)
+[  2161.2s] s3600/f0 G_fwd_det_done
+[  2161.2s] s3600/f1 d_real=0.8526
+[  2161.2s] s3600/f2 d_fake=0.0928
+[  2161.2s] s3600/f3 d_loss=0.0004
+[  2161.2s] s3600/f4 D_opt_done
+[  2161.4s] s3600/f4b G_fwd_done (pretrain=false)
+[  2161.4s] s3600/f5 g_recon=2.0142
+[  2161.4s] s3600 g_tv=0.3447 g_conf=0.2320 g_sym=0.2137
+[  2161.4s] s3600/f6 g_adv=0.2871
+[  2164.1s]   batch 40 (step 3604) [2229ms]
+[  2167.2s]   batch 45 (step 3609) [73ms]
+[  2169.3s]   batch 50 (step 3614) [207ms]
+[  2174.2s]   batch 55 (step 3619) [156ms]
+[  2177.2s]   batch 60 (step 3624) [2579ms]
+[  2179.7s]   batch 65 (step 3629) [117ms]
+[  2182.7s]   batch 70 (step 3634) [134ms]
+[  2185.8s]   batch 75 (step 3639) [238ms]
+[  2191.2s]   batch 80 (step 3644) [2262ms]
+[  2193.6s]   batch 85 (step 3649) [163ms]
+[  2196.9s]   batch 90 (step 3654) [112ms]
+[  2199.3s]   batch 95 (step 3659) [116ms]
+[  2204.0s]   batch 100 (step 3664) [2063ms]
+[  2206.7s]   batch 105 (step 3669) [89ms]
+[  2209.2s]   batch 110 (step 3674) [133ms]
+[  2211.2s]   batch 115 (step 3679) [149ms]
+[  2214.4s]   batch 120 (step 3684) [1752ms]
+[  2217.3s]   batch 125 (step 3689) [147ms]
+[  2219.8s]   batch 130 (step 3694) [258ms]
+[  2223.0s]   batch 135 (step 3699) [186ms]
+[  2224.5s] s3700/f0 G_fwd_det_done
+[  2224.5s] s3700/f1 d_real=0.8369
+[  2224.5s] s3700/f2 d_fake=0.0360
+[  2224.5s] s3700/f3 d_loss=0.0027
+[  2224.5s] s3700/f4 D_opt_done
+[  2224.6s] s3700/f4b G_fwd_done (pretrain=false)
+[  2224.6s] s3700/f5 g_recon=1.8613
+[  2224.6s] s3700 g_tv=0.3456 g_conf=0.2358 g_sym=0.2359
+[  2224.6s] s3700/f6 g_adv=0.3310
+[  2226.9s]   batch 140 (step 3704) [1897ms]
+[  2228.7s]   batch 145 (step 3709) [164ms]
+[  2231.2s]   batch 150 (step 3714) [308ms]
+[  2233.9s]   batch 155 (step 3719) [114ms]
+[  2238.3s]   batch 160 (step 3724) [1469ms]
+[  2241.0s]   batch 165 (step 3729) [162ms]
+[  2243.7s]   batch 170 (step 3734) [212ms]
+[  2246.4s]   batch 175 (step 3739) [126ms]
+[  2249.9s]   batch 180 (step 3744) [1484ms]
+[  2252.4s]   batch 185 (step 3749) [164ms]
+[  2254.9s]   batch 190 (step 3754) [183ms]
+[  2258.5s]   batch 195 (step 3759) [152ms]
+[  2262.7s]   batch 200 (step 3764) [1641ms]
+[  2264.8s]   batch 205 (step 3769) [142ms]
+[  2267.3s]   batch 210 (step 3774) [60ms]
+[  2269.9s]   batch 215 (step 3779) [219ms]
+[  2274.9s]   batch 220 (step 3784) [2174ms]
+[  2277.3s]   batch 225 (step 3789) [183ms]
+[  2279.5s]   batch 230 (step 3794) [171ms]
+[  2281.3s]   batch 235 (step 3799) [165ms]
+[  2282.7s] Saving batch checkpoint (step 3800)…
+[  2282.8s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  2282.8s]   Batch checkpoint saved (step 3800)
+[  2282.9s] s3800/f0 G_fwd_det_done
+[  2282.9s] s3800/f1 d_real=0.8364
+[  2282.9s] s3800/f2 d_fake=0.0850
+[  2282.9s] s3800/f3 d_loss=0.0009
+[  2282.9s] s3800/f4 D_opt_done
+[  2282.9s] s3800/f4b G_fwd_done (pretrain=false)
+[  2282.9s] s3800/f5 g_recon=1.6771
+[  2282.9s] s3800 g_tv=0.2944 g_conf=0.2041 g_sym=0.2898
+[  2282.9s] s3800/f6 g_adv=0.2912
+[  2285.3s]   batch 240 (step 3804) [1923ms]
+[  2287.5s]   batch 245 (step 3809) [198ms]
+[  2290.7s]   batch 250 (step 3814) [149ms]
+[  2293.0s]   batch 255 (step 3819) [171ms]
+[  2298.2s]   batch 260 (step 3824) [2479ms]
+[  2301.0s]   batch 265 (step 3829) [99ms]
+[  2303.0s]   batch 270 (step 3834) [176ms]
+[  2305.8s]   batch 275 (step 3839) [190ms]
+[  2309.9s]   batch 280 (step 3844) [1796ms]
+[  2312.1s]   batch 285 (step 3849) [192ms]
+[  2315.0s]   batch 290 (step 3854) [95ms]
+[  2317.6s]   batch 295 (step 3859) [233ms]
+[  2322.7s]   batch 300 (step 3864) [2102ms]
+[  2324.7s]   batch 305 (step 3869) [159ms]
+[  2327.5s]   batch 310 (step 3874) [198ms]
+[  2330.6s]   batch 315 (step 3879) [158ms]
+[  2334.1s]   batch 320 (step 3884) [1470ms]
+[  2336.6s]   batch 325 (step 3889) [296ms]
+[  2339.3s]   batch 330 (step 3894) [143ms]
+[  2341.9s]   batch 335 (step 3899) [192ms]
+[  2343.7s] s3900/f0 G_fwd_det_done
+[  2343.7s] s3900/f1 d_real=0.8764
+[  2343.7s] s3900/f2 d_fake=0.0214
+[  2343.7s] s3900/f3 d_loss=0.0041
+[  2343.7s] s3900/f4 D_opt_done
+[  2343.9s] s3900/f4b G_fwd_done (pretrain=false)
+[  2343.9s] s3900/f5 g_recon=2.1331
+[  2343.9s] s3900 g_tv=0.3841 g_conf=0.3247 g_sym=0.2023
+[  2343.9s] s3900/f6 g_adv=0.3434
+[  2346.1s]   batch 340 (step 3904) [1877ms]
+[  2348.6s]   batch 345 (step 3909) [215ms]
+[  2350.7s]   batch 350 (step 3914) [94ms]
+[  2352.8s]   batch 355 (step 3919) [165ms]
+[  2356.5s]   batch 360 (step 3924) [2121ms]
+[  2359.3s]   batch 365 (step 3929) [167ms]
+[  2361.5s]   batch 370 (step 3934) [181ms]
+[  2363.8s]   batch 375 (step 3939) [125ms]
+[  2367.7s]   batch 380 (step 3944) [1555ms]
+[  2371.4s]   batch 385 (step 3949) [272ms]
+[  2374.1s]   batch 390 (step 3954) [224ms]
+[  2377.2s]   batch 395 (step 3959) [192ms]
+[  2381.0s]   batch 400 (step 3964) [2007ms]
+[  2384.0s]   batch 405 (step 3969) [138ms]
+[  2386.4s]   batch 410 (step 3974) [286ms]
+[  2389.0s]   batch 415 (step 3979) [209ms]
+[  2393.1s]   batch 420 (step 3984) [1712ms]
+[  2395.9s]   batch 425 (step 3989) [226ms]
+[  2398.9s]   batch 430 (step 3994) [45ms]
+[  2401.8s]   batch 435 (step 3999) [169ms]
+[  2403.3s] Saving batch checkpoint (step 4000)…
+[  2403.5s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  2403.5s]   Batch checkpoint saved (step 4000)
+[  2403.6s] s4000/f0 G_fwd_det_done
+[  2403.6s] s4000/f1 d_real=0.8360
+[  2403.6s] s4000/f2 d_fake=0.0466
+[  2403.6s] s4000/f3 d_loss=0.0020
+[  2403.6s] s4000/f4 D_opt_done
+[  2403.6s] s4000/f4b G_fwd_done (pretrain=false)
+[  2403.6s] s4000/f5 g_recon=1.7204
+[  2403.6s] s4000 g_tv=0.3364 g_conf=0.2282 g_sym=0.2321
+[  2403.6s] s4000/f6 g_adv=0.3230
+[  2405.6s]   batch 440 (step 4004) [1678ms]
+[  2408.4s]   batch 445 (step 4009) [132ms]
+[  2411.1s]   batch 450 (step 4014) [83ms]
+[  2413.4s]   batch 455 (step 4019) [265ms]
+[  2417.1s]   batch 460 (step 4024) [1580ms]
+[  2418.4s]   batch 465 (step 4029) [78ms]
+[  2420.4s]   batch 470 (step 4034) [302ms]
+[  2422.4s]   batch 475 (step 4039) [178ms]
+[  2426.5s]   batch 480 (step 4044) [1502ms]
+[  2428.8s]   batch 485 (step 4049) [123ms]
+[  2431.4s]   batch 490 (step 4054) [69ms]
+[  2433.7s]   batch 495 (step 4059) [183ms]
+[  2437.9s]   batch 500 (step 4064) [1949ms]
+[  2441.0s]   batch 505 (step 4069) [157ms]
+[  2443.7s]   batch 510 (step 4074) [159ms]
+[  2445.7s]   batch 515 (step 4079) [178ms]
+[  2562.7s]   batch 520 (step 4084) [60472ms]
+[  2652.7s]   batch 525 (step 4089) [28915ms]
+[  2804.3s]   batch 530 (step 4094) [46ms]
+[  2804.3s]   batch 535 (step 4099) [106ms]
+[  2832.7s] s4100/f0 G_fwd_det_done
+[  2832.7s] s4100/f1 d_real=0.8258
+[  2832.7s] s4100/f2 d_fake=0.0255
+[  2832.7s] s4100/f3 d_loss=0.0035
+[  2832.7s] s4100/f4 D_opt_done
+[  2862.7s] s4100/f4b G_fwd_done (pretrain=false)
+[  2862.7s] s4100/f5 g_recon=2.0580
+[  2862.7s] s4100 g_tv=0.3744 g_conf=0.2293 g_sym=0.1844
+[  2862.7s] s4100/f6 g_adv=0.3395
+[  2892.4s]   batch 540 (step 4104) [30382ms]
+[  2952.7s]   batch 545 (step 4109) [152ms]
+[  3102.7s]   batch 550 (step 4114) [206ms]
+[  3222.7s]   batch 555 (step 4119) [151ms]
+[  3404.3s]   batch 560 (step 4124) [59354ms]
+[  3404.3s]   batch 565 (step 4129) [332ms]
+[  3462.8s]   batch 570 (step 4134) [68ms]
+[  3492.7s]   batch 575 (step 4139) [115ms]
+[  3702.8s]   batch 580 (step 4144) [59600ms]
+[  3762.7s]   batch 585 (step 4149) [96ms]
+[  3822.7s]   batch 590 (step 4154) [227ms]
+[  3912.8s]   batch 595 (step 4159) [211ms]
+[  4004.3s]   batch 600 (step 4164) [31350ms]
+[  4092.8s]   batch 605 (step 4169) [62ms]
+[  4122.8s]   batch 610 (step 4174) [218ms]
+[  4242.8s]   batch 615 (step 4179) [96ms]
+[  4332.8s]   batch 620 (step 4184) [847ms]
+[  4396.7s]   batch 625 (step 4189) [4984ms]
+[  4399.5s]   batch 630 (step 4194) [110ms]
+[  4401.8s]   batch 635 (step 4199) [160ms]
+[  4403.6s] Saving batch checkpoint (step 4200)…
+[  4403.8s] CHECKPOINT: E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon\checkpoint_batch_latest
+[  4403.8s]   Batch checkpoint saved (step 4200)
+[  4403.9s] s4200/f0 G_fwd_det_done
+[  4403.9s] s4200/f1 d_real=0.8489
+[  4403.9s] s4200/f2 d_fake=0.0405
+[  4403.9s] s4200/f3 d_loss=0.0022
+[  4403.9s] s4200/f4 D_opt_done
+[  4404.0s] s4200/f4b G_fwd_done (pretrain=false)
+[  4404.0s] s4200/f5 g_recon=1.8822
+[  4404.0s] s4200 g_tv=0.3861 g_conf=0.2534 g_sym=0.2258
+[  4404.0s] s4200/f6 g_adv=0.3279
+[  4406.7s]   batch 640 (step 4204) [2256ms]
+[  4409.8s]   batch 645 (step 4209) [164ms]
+[  4412.8s]   batch 650 (step 4214) [155ms]
+[  4415.7s]   batch 655 (step 4219) [200ms]
+[  4421.2s]   batch 660 (step 4224) [2013ms]
+[  4423.2s]   batch 665 (step 4229) [146ms]
+[  4425.5s]   batch 670 (step 4234) [310ms]
+[  4428.6s]   batch 675 (step 4239) [172ms]
+[  4433.5s]   batch 680 (step 4244) [2274ms]
+[  4436.4s]   batch 685 (step 4249) [249ms]
+[  4440.0s]   batch 690 (step 4254) [116ms]
+[  4443.2s]   batch 695 (step 4259) [250ms]
+[  4447.8s]   batch 700 (step 4264) [1637ms]
+[  4450.4s]   batch 705 (step 4269) [212ms]
+[  4454.1s]   batch 710 (step 4274) [119ms]

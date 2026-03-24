@@ -1,0 +1,11 @@
+[package]
+name = "morph_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+leaf_complex_rust = { path = "../../../ShapeComplexity" }
+image = "0.24.7"
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,21 @@
+{
+  "hidden_size": 768,
+  "num_attention_heads": 12,
+  "num_hidden_layers": 12,
+  "patch_size": 16,
+  "num_register_tokens": 4,
+  "layerscale_value": 1.0,
+  "mlp_ratio": null,
+  "rope_theta": 100.0,
+  "hidden_act": "gelu",
+  "image_size": 224,
+  "num_channels": 3,
+  "layer_norm_eps": 1e-05,
+  "pos_embed_rope_base": null,
+  "pos_embed_rope_min_period": null,
+  "pos_embed_rope_max_period": null,
+  "feature_layers": [
+    -1,
+    -6
+  ]
+}

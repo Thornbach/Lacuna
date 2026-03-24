@@ -1,0 +1,10 @@
+[package]
+name = "tract_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tract-onnx = "0.21"
+
+[profile.release]
+opt-level = 2

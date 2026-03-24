@@ -1,0 +1,332 @@
+﻿=== OPSET ===
+  domain='' version=18
+
+=== INPUTS / OUTPUTS ===
+  in  images [1, 3, 512, 512]
+  out features [1, 1024, 1536]
+
+=== OP-TYPE HISTOGRAM ===
+  Add                      120
+  Mul                      108
+  MatMul                   96
+  Transpose                61
+  Reshape                  50
+  Concat                   50
+  Slice                    50
+  LayerNormalization       24
+  Split                    24
+  Neg                      24
+  Div                      15
+  Softmax                  12
+  Erf                      12
+  ReduceL2                 2
+  Clip                     2
+  Expand                   2
+  Sub                      1
+  Conv                     1
+  Tile                     1
+  Cos                      1
+  Sin                      1
+
+=== PARAMS: 85,673,253 (343 MB f32) ===
+
+=== ALL INITIALIZERS (name -> shape) ===
+  model.embeddings.patch_embeddings.bias                       (768,)
+  model.model.layer.0.norm1.weight                             (768,)
+  model.model.layer.0.norm1.bias                               (768,)
+  model.model.layer.0.attention.v_proj.bias                    (768,)
+  model.model.layer.0.attention.o_proj.bias                    (768,)
+  model.model.layer.0.layer_scale1.lambda1                     (768,)
+  model.model.layer.0.norm2.weight                             (768,)
+  model.model.layer.0.norm2.bias                               (768,)
+  model.model.layer.0.mlp.down_proj.bias                       (768,)
+  model.model.layer.0.layer_scale2.lambda1                     (768,)
+  model.model.layer.1.norm1.weight                             (768,)
+  model.model.layer.1.norm1.bias                               (768,)
+  model.model.layer.1.attention.o_proj.bias                    (768,)
+  model.model.layer.1.layer_scale1.lambda1                     (768,)
+  model.model.layer.1.norm2.weight                             (768,)
+  model.model.layer.1.norm2.bias                               (768,)
+  model.model.layer.1.mlp.down_proj.bias                       (768,)
+  model.model.layer.1.layer_scale2.lambda1                     (768,)
+  model.model.layer.2.norm1.weight                             (768,)
+  model.model.layer.2.norm1.bias                               (768,)
+  model.model.layer.2.attention.o_proj.bias                    (768,)
+  model.model.layer.2.layer_scale1.lambda1                     (768,)
+  model.model.layer.2.norm2.weight                             (768,)
+  model.model.layer.2.norm2.bias                               (768,)
+  model.model.layer.2.mlp.down_proj.bias                       (768,)
+  model.model.layer.2.layer_scale2.lambda1                     (768,)
+  model.model.layer.3.norm1.weight                             (768,)
+  model.model.layer.3.norm1.bias                               (768,)
+  model.model.layer.3.attention.o_proj.bias                    (768,)
+  model.model.layer.3.layer_scale1.lambda1                     (768,)
+  model.model.layer.3.norm2.weight                             (768,)
+  model.model.layer.3.norm2.bias                               (768,)
+  model.model.layer.3.mlp.down_proj.bias                       (768,)
+  model.model.layer.3.layer_scale2.lambda1                     (768,)
+  model.model.layer.4.norm1.weight                             (768,)
+  model.model.layer.4.norm1.bias                               (768,)
+  model.model.layer.4.attention.o_proj.bias                    (768,)
+  model.model.layer.4.layer_scale1.lambda1                     (768,)
+  model.model.layer.4.norm2.weight                             (768,)
+  model.model.layer.4.norm2.bias                               (768,)
+  model.model.layer.4.mlp.down_proj.bias                       (768,)
+  model.model.layer.4.layer_scale2.lambda1                     (768,)
+  model.model.layer.5.norm1.weight                             (768,)
+  model.model.layer.5.norm1.bias                               (768,)
+  model.model.layer.5.attention.o_proj.bias                    (768,)
+  model.model.layer.5.layer_scale1.lambda1                     (768,)
+  model.model.layer.5.norm2.weight                             (768,)
+  model.model.layer.5.norm2.bias                               (768,)
+  model.model.layer.5.mlp.down_proj.bias                       (768,)
+  model.model.layer.5.layer_scale2.lambda1                     (768,)
+  model.model.layer.6.norm1.weight                             (768,)
+  model.model.layer.6.norm1.bias                               (768,)
+  model.model.layer.6.attention.o_proj.bias                    (768,)
+  model.model.layer.6.layer_scale1.lambda1                     (768,)
+  model.model.layer.6.norm2.weight                             (768,)
+  model.model.layer.6.norm2.bias                               (768,)
+  model.model.layer.6.mlp.down_proj.bias                       (768,)
+  model.model.layer.6.layer_scale2.lambda1                     (768,)
+  model.model.layer.7.norm1.weight                             (768,)
+  model.model.layer.7.norm1.bias                               (768,)
+  model.model.layer.7.attention.o_proj.bias                    (768,)
+  model.model.layer.7.layer_scale1.lambda1                     (768,)
+  model.model.layer.7.norm2.weight                             (768,)
+  model.model.layer.7.norm2.bias                               (768,)
+  model.model.layer.7.mlp.down_proj.bias                       (768,)
+  model.model.layer.7.layer_scale2.lambda1                     (768,)
+  model.model.layer.8.norm1.weight                             (768,)
+  model.model.layer.8.norm1.bias                               (768,)
+  model.model.layer.8.attention.o_proj.bias                    (768,)
+  model.model.layer.8.layer_scale1.lambda1                     (768,)
+  model.model.layer.8.norm2.weight                             (768,)
+  model.model.layer.8.norm2.bias                               (768,)
+  model.model.layer.8.mlp.down_proj.bias                       (768,)
+  model.model.layer.8.layer_scale2.lambda1                     (768,)
+  model.model.layer.9.norm1.weight                             (768,)
+  model.model.layer.9.norm1.bias                               (768,)
+  model.model.layer.9.attention.o_proj.bias                    (768,)
+  model.model.layer.9.layer_scale1.lambda1                     (768,)
+  model.model.layer.9.norm2.weight                             (768,)
+  model.model.layer.9.norm2.bias                               (768,)
+  model.model.layer.9.mlp.down_proj.bias                       (768,)
+  model.model.layer.9.layer_scale2.lambda1                     (768,)
+  model.model.layer.10.norm1.weight                            (768,)
+  model.model.layer.10.norm1.bias                              (768,)
+  model.model.layer.10.attention.o_proj.bias                   (768,)
+  model.model.layer.10.layer_scale1.lambda1                    (768,)
+  model.model.layer.10.norm2.weight                            (768,)
+  model.model.layer.10.norm2.bias                              (768,)
+  model.model.layer.10.mlp.down_proj.bias                      (768,)
+  model.model.layer.10.layer_scale2.lambda1                    (768,)
+  model.model.layer.11.norm1.weight                            (768,)
+  model.model.layer.11.norm1.bias                              (768,)
+  model.model.layer.11.attention.o_proj.bias                   (768,)
+  model.model.layer.11.layer_scale1.lambda1                    (768,)
+  model.model.layer.11.norm2.weight                            (768,)
+  model.model.layer.11.norm2.bias                              (768,)
+  model.model.layer.11.mlp.down_proj.bias                      (768,)
+  model.model.layer.11.layer_scale2.lambda1                    (768,)
+  mean                                                         (1, 3, 1, 1)
+  std                                                          (1, 3, 1, 1)
+  model.embeddings.patch_embeddings.weight                     (768, 3, 16, 16)
+  model.model.layer.0.mlp.up_proj.bias                         (3072,)
+  model.model.layer.1.mlp.up_proj.bias                         (3072,)
+  model.model.layer.2.mlp.up_proj.bias                         (3072,)
+  model.model.layer.3.mlp.up_proj.bias                         (3072,)
+  model.model.layer.4.mlp.up_proj.bias                         (3072,)
+  model.model.layer.5.mlp.up_proj.bias                         (3072,)
+  model.model.layer.6.mlp.up_proj.bias                         (3072,)
+  model.model.layer.7.mlp.up_proj.bias                         (3072,)
+  model.model.layer.8.mlp.up_proj.bias                         (3072,)
+  model.model.layer.9.mlp.up_proj.bias                         (3072,)
+  model.model.layer.10.mlp.up_proj.bias                        (3072,)
+  model.model.layer.11.mlp.up_proj.bias                        (3072,)
+  val_4                                                        (3,)
+  expand                                                       (1, 1, 768)
+  expand_1                                                     (1, 4, 768)
+  mul_2                                                        (1024, 2, 16)
+  val_57                                                       (2,)
+  val_61                                                       (768, 768)
+  val_63                                                       (768, 768)
+  val_64                                                       (768, 768)
+  val_71                                                       (4,)
+  val_88                                                       (1,)
+  val_91                                                       (1,)
+  val_95                                                       (1,)
+  val_103                                                      (1,)
+  val_133                                                      (3,)
+  val_134                                                      (768, 768)
+  val_138                                                      (768, 3072)
+  val_147                                                      (3072, 768)
+  val_151                                                      (768, 768)
+  val_153                                                      (768, 768)
+  val_154                                                      (768, 768)
+  val_219                                                      (768, 768)
+  val_223                                                      (768, 3072)
+  val_232                                                      (3072, 768)
+  val_236                                                      (768, 768)
+  val_238                                                      (768, 768)
+  val_239                                                      (768, 768)
+  val_304                                                      (768, 768)
+  val_308                                                      (768, 3072)
+  val_317                                                      (3072, 768)
+  val_321                                                      (768, 768)
+  val_323                                                      (768, 768)
+  val_324                                                      (768, 768)
+  val_389                                                      (768, 768)
+  val_393                                                      (768, 3072)
+  val_402                                                      (3072, 768)
+  val_406                                                      (768, 768)
+  val_408                                                      (768, 768)
+  val_409                                                      (768, 768)
+  val_474                                                      (768, 768)
+  val_478                                                      (768, 3072)
+  val_487                                                      (3072, 768)
+  val_491                                                      (768, 768)
+  val_493                                                      (768, 768)
+  val_494                                                      (768, 768)
+  val_559                                                      (768, 768)
+  val_563                                                      (768, 3072)
+  val_572                                                      (3072, 768)
+  val_576                                                      (768, 768)
+  val_578                                                      (768, 768)
+  val_579                                                      (768, 768)
+  val_644                                                      (768, 768)
+  val_648                                                      (768, 3072)
+  val_657                                                      (3072, 768)
+  val_661                                                      (768, 768)
+  val_663                                                      (768, 768)
+  val_664                                                      (768, 768)
+  val_729                                                      (768, 768)
+  val_733                                                      (768, 3072)
+  val_742                                                      (3072, 768)
+  val_746                                                      (768, 768)
+  val_748                                                      (768, 768)
+  val_749                                                      (768, 768)
+  val_814                                                      (768, 768)
+  val_818                                                      (768, 3072)
+  val_827                                                      (3072, 768)
+  val_831                                                      (768, 768)
+  val_833                                                      (768, 768)
+  val_834                                                      (768, 768)
+  val_899                                                      (768, 768)
+  val_903                                                      (768, 3072)
+  val_912                                                      (3072, 768)
+  val_916                                                      (768, 768)
+  val_918                                                      (768, 768)
+  val_919                                                      (768, 768)
+  val_984                                                      (768, 768)
+  val_988                                                      (768, 3072)
+  val_997                                                      (3072, 768)
+  val_1001                                                     (768, 768)
+  val_1003                                                     (768, 768)
+  val_1004                                                     (768, 768)
+  val_1069                                                     (768, 768)
+  val_1073                                                     (768, 3072)
+  val_1082                                                     (3072, 768)
+  val_1087                                                     (1,)
+  val_1093                                                     (1,)
+  val_1097                                                     (1,)
+  val_1099                                                     ()
+  val_1104                                                     (3,)
+  val_58                                                       (2,)
+  val_84                                                       (2,)
+  val_128                                                      ()
+  val_140                                                      ()
+  val_143                                                      ()
+  val_145                                                      ()
+
+=== NODE SEQUENCE (first ~90 nodes = embed + block 0) ===
+  [  0] Sub            node_sub                                
+  [  1] Div            node_div                                
+  [  2] Conv           node_conv2d                             
+  [  3] Reshape        node_view                               
+  [  4] Transpose      node_transpose                           perm=[0, 2, 1]
+  [  5] Concat         node_cat                                 axis=1
+  [  6] Reshape        node_view_4                             
+  [  7] Tile           node_tile                               
+  [  8] Cos            node_cos                                
+  [  9] Sin            node_sin                                
+  [ 10] LayerNormalization node_layer_norm                          axis=-1 epsilon=9.999999747378752e-06
+  [ 11] MatMul         node_MatMul_60                          
+  [ 12] Add            node_linear                             
+  [ 13] MatMul         node_linear_1                           
+  [ 14] MatMul         node_MatMul_63                          
+  [ 15] Add            node_linear_2                           
+  [ 16] Reshape        node_view_5                             
+  [ 17] Transpose      node_transpose_1                         perm=[0, 2, 1, 3]
+  [ 18] Reshape        node_view_6                             
+  [ 19] Transpose      node_transpose_2                         perm=[0, 2, 1, 3]
+  [ 20] Reshape        node_view_7                             
+  [ 21] Transpose      node_transpose_3                         perm=[0, 2, 1, 3]
+  [ 22] Split          node_Split_1077                          axis=2
+  [ 23] Split          node_Split_1081                          axis=2
+  [ 24] Mul            node_mul_3                              
+  [ 25] Slice          node_slice_1                            
+  [ 26] Slice          node_slice_2                            
+  [ 27] Neg            node_neg                                
+  [ 28] Concat         node_cat_1                               axis=-1
+  [ 29] Mul            node_mul_4                              
+  [ 30] Add            node_add                                
+  [ 31] Mul            node_mul_5                              
+  [ 32] Slice          node_slice_3                            
+  [ 33] Slice          node_slice_4                            
+  [ 34] Neg            node_neg_1                              
+  [ 35] Concat         node_cat_2                               axis=-1
+  [ 36] Mul            node_mul_6                              
+  [ 37] Add            node_add_1                              
+  [ 38] Concat         node_cat_3                               axis=-2
+  [ 39] Concat         node_cat_4                               axis=-2
+  [ 40] Transpose      node_transpose_4                         perm=[0, 1, 3, 2]
+  [ 41] MatMul         node_matmul                             
+  [ 42] Mul            node_mul_7                              
+  [ 43] Softmax        node_softmax                             axis=-1
+  [ 44] MatMul         node_matmul_1                           
+  [ 45] Transpose      node_transpose_5                         perm=[0, 2, 1, 3]
+  [ 46] Reshape        node_view_8                             
+  [ 47] MatMul         node_MatMul_133                         
+  [ 48] Add            node_linear_3                           
+  [ 49] Mul            node_mul_8                              
+  [ 50] Add            node_add_2                              
+  [ 51] LayerNormalization node_layer_norm_1                        axis=-1 epsilon=9.999999747378752e-06
+  [ 52] MatMul         node_MatMul_135                         
+  [ 53] Add            node_linear_4                           
+  [ 54] Div            node_Div_137                            
+  [ 55] Erf            node_Erf_138                            
+  [ 56] Add            node_Add_140                            
+  [ 57] Mul            node_Mul_142                            
+  [ 58] Mul            node_gelu                               
+  [ 59] MatMul         node_MatMul_144                         
+  [ 60] Add            node_linear_5                           
+  [ 61] Mul            node_mul_9                              
+  [ 62] Add            node_add_3                              
+  [ 63] LayerNormalization node_layer_norm_2                        axis=-1 epsilon=9.999999747378752e-06
+  [ 64] MatMul         node_MatMul_146                         
+  [ 65] Add            node_linear_6                           
+  [ 66] MatMul         node_linear_7                           
+  [ 67] MatMul         node_MatMul_149                         
+  [ 68] Add            node_linear_8                           
+  [ 69] Reshape        node_view_9                             
+  [ 70] Transpose      node_transpose_6                         perm=[0, 2, 1, 3]
+  [ 71] Reshape        node_view_10                            
+  [ 72] Transpose      node_transpose_7                         perm=[0, 2, 1, 3]
+  [ 73] Reshape        node_view_11                            
+  [ 74] Transpose      node_transpose_8                         perm=[0, 2, 1, 3]
+  [ 75] Split          node_Split_1097                          axis=2
+  [ 76] Split          node_Split_1101                          axis=2
+  [ 77] Mul            node_mul_10                             
+  [ 78] Slice          node_slice_5                            
+  [ 79] Slice          node_slice_6                            
+  [ 80] Neg            node_neg_2                              
+  [ 81] Concat         node_cat_5                               axis=-1
+  [ 82] Mul            node_mul_11                             
+  [ 83] Add            node_add_4                              
+  [ 84] Mul            node_mul_12                             
+  [ 85] Slice          node_slice_7                            
+  [ 86] Slice          node_slice_8                            
+  [ 87] Neg            node_neg_3                              
+  [ 88] Concat         node_cat_6                               axis=-1
+  [ 89] Mul            node_mul_13                             

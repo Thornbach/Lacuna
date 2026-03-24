@@ -1,0 +1,153 @@
+{
+ "config": {
+  "nc": 1,
+  "nm": 32,
+  "reg_max": 1,
+  "stride": [
+   8.0,
+   16.0,
+   32.0
+  ],
+  "max_det": 300,
+  "npr": 256,
+  "imgsz": 640
+ },
+ "blueprint": [
+  {
+   "i": 0,
+   "from": -1,
+   "type": "Conv"
+  },
+  {
+   "i": 1,
+   "from": -1,
+   "type": "Conv"
+  },
+  {
+   "i": 2,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 3,
+   "from": -1,
+   "type": "Conv"
+  },
+  {
+   "i": 4,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 5,
+   "from": -1,
+   "type": "Conv"
+  },
+  {
+   "i": 6,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 7,
+   "from": -1,
+   "type": "Conv"
+  },
+  {
+   "i": 8,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 9,
+   "from": -1,
+   "type": "SPPF"
+  },
+  {
+   "i": 10,
+   "from": -1,
+   "type": "C2PSA"
+  },
+  {
+   "i": 11,
+   "from": -1,
+   "type": "Upsample"
+  },
+  {
+   "i": 12,
+   "from": [
+    -1,
+    6
+   ],
+   "type": "Concat"
+  },
+  {
+   "i": 13,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 14,
+   "from": -1,
+   "type": "Upsample"
+  },
+  {
+   "i": 15,
+   "from": [
+    -1,
+    4
+   ],
+   "type": "Concat"
+  },
+  {
+   "i": 16,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 17,
+   "from": -1,
+   "type": "Conv"
+  },
+  {
+   "i": 18,
+   "from": [
+    -1,
+    13
+   ],
+   "type": "Concat"
+  },
+  {
+   "i": 19,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 20,
+   "from": -1,
+   "type": "Conv"
+  },
+  {
+   "i": 21,
+   "from": [
+    -1,
+    10
+   ],
+   "type": "Concat"
+  },
+  {
+   "i": 22,
+   "from": -1,
+   "type": "C3k2"
+  },
+  {
+   "i": 23,
+   "from": [
+    16,
+    19,
+    22
+   ],
+   "type": "Segment26"
+  }
+ ]
+}

@@ -1,0 +1,35 @@
+# ── Rust build artifacts (root crate + nested scratch crates in port/*_test) ──
+# NB: no leading slash → matches target/ at any depth, not just the repo root.
+target/
+**/*.rs.bk
+
+# ── Editor / agent state ──
+/.claude/
+.vscode/
+.idea/
+
+# ── Model weights, ONNX exports & validation references ───────────────────────
+# Too large for git (DINOv3 ~327 MB, YOLO26 ~90 MB, recon checkpoints ~59 MB each,
+# validation refs). Regenerate with port/export_*.py + port/*_reference.py, or fetch
+# from a GitHub Release / external storage. See README.
+*.onnx
+*.onnx.data
+*.safetensors
+*.mpk
+*.pt
+*.npz
+*.faiss
+coreset_bank.bin
+bank.bin
+
+# ── Generated outputs ─────────────────────────────────────────────────────────
+smoke_out/
+outputs/
+dist/               # packaged release zips (scripts/package.ps1)
+# NB: models/ IS tracked, but the big weights in it are excluded by the extension
+# rules above — so small configs (detector_meta.json, fewshot_head.json, …) stay
+# versioned while the multi-hundred-MB *.onnx/*.safetensors/*.mpk do not.
+
+# ── OS cruft ──
+Thumbs.db
+.DS_Store

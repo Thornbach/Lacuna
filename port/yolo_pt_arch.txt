@@ -1,0 +1,335 @@
+﻿=== model class: SegmentationModel
+=== task: segment
+=== names: {0: 'leaf'}
+=== total params: 26969951
+
+=== YAML (architecture spec) ===
+{
+ "nc": 1,
+ "end2end": true,
+ "reg_max": 1,
+ "scales": {
+  "n": [
+   0.5,
+   0.25,
+   1024
+  ],
+  "s": [
+   0.5,
+   0.5,
+   1024
+  ],
+  "m": [
+   0.5,
+   1.0,
+   512
+  ],
+  "l": [
+   1.0,
+   1.0,
+   512
+  ],
+  "x": [
+   1.0,
+   1.5,
+   512
+  ]
+ },
+ "backbone": [
+  [
+   -1,
+   1,
+   "Conv",
+   [
+    64,
+    3,
+    2
+   ]
+  ],
+  [
+   -1,
+   1,
+   "Conv",
+   [
+    128,
+    3,
+    2
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C3k2",
+   [
+    256,
+    false,
+    0.25
+   ]
+  ],
+  [
+   -1,
+   1,
+   "Conv",
+   [
+    256,
+    3,
+    2
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C3k2",
+   [
+    512,
+    false,
+    0.25
+   ]
+  ],
+  [
+   -1,
+   1,
+   "Conv",
+   [
+    512,
+    3,
+    2
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C3k2",
+   [
+    512,
+    true
+   ]
+  ],
+  [
+   -1,
+   1,
+   "Conv",
+   [
+    1024,
+    3,
+    2
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C3k2",
+   [
+    1024,
+    true
+   ]
+  ],
+  [
+   -1,
+   1,
+   "SPPF",
+   [
+    1024,
+    5,
+    3,
+    true
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C2PSA",
+   [
+    1024
+   ]
+  ]
+ ],
+ "head": [
+  [
+   -1,
+   1,
+   "nn.Upsample",
+   [
+    "None",
+    2,
+    "nearest"
+   ]
+  ],
+  [
+   [
+    -1,
+    6
+   ],
+   1,
+   "Concat",
+   [
+    1
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C3k2",
+   [
+    512,
+    true
+   ]
+  ],
+  [
+   -1,
+   1,
+   "nn.Upsample",
+   [
+    "None",
+    2,
+    "nearest"
+   ]
+  ],
+  [
+   [
+    -1,
+    4
+   ],
+   1,
+   "Concat",
+   [
+    1
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C3k2",
+   [
+    256,
+    true
+   ]
+  ],
+  [
+   -1,
+   1,
+   "Conv",
+   [
+    256,
+    3,
+    2
+   ]
+  ],
+  [
+   [
+    -1,
+    13
+   ],
+   1,
+   "Concat",
+   [
+    1
+   ]
+  ],
+  [
+   -1,
+   2,
+   "C3k2",
+   [
+    512,
+    true
+   ]
+  ],
+  [
+   -1,
+   1,
+   "Conv",
+   [
+    512,
+    3,
+    2
+   ]
+  ],
+  [
+   [
+    -1,
+    10
+   ],
+   1,
+   "Concat",
+   [
+    1
+   ]
+  ],
+  [
+   -1,
+   1,
+   "C3k2",
+   [
+    1024,
+    true,
+    0.5,
+    true
+   ]
+  ],
+  [
+   [
+    16,
+    19,
+    22
+   ],
+   1,
+   "Segment26",
+   [
+    "nc",
+    32,
+    256
+   ]
+  ]
+ ],
+ "scale": "m",
+ "yaml_file": "yolo26m-seg.yaml",
+ "channels": 3
+}
+
+=== LAYERS (i | from | n | type | args | #params) ===
+  [ 0] f=-1             Conv             params=     1856  out=(1, 64, 320, 320)
+  [ 1] f=-1             Conv             params=    73984  out=(1, 128, 160, 160)
+  [ 2] f=-1             C3k2             params=   111872  out=(1, 256, 160, 160)
+  [ 3] f=-1             Conv             params=   590336  out=(1, 256, 80, 80)
+  [ 4] f=-1             C3k2             params=   444928  out=(1, 512, 80, 80)
+  [ 5] f=-1             Conv             params=  2360320  out=(1, 512, 40, 40)
+  [ 6] f=-1             C3k2             params=  1380352  out=(1, 512, 40, 40)
+  [ 7] f=-1             Conv             params=  2360320  out=(1, 512, 20, 20)
+  [ 8] f=-1             C3k2             params=  1380352  out=(1, 512, 20, 20)
+  [ 9] f=-1             SPPF             params=   656896  out=(1, 512, 20, 20)
+  [10] f=-1             C2PSA            params=   990976  out=(1, 512, 20, 20)
+  [11] f=-1             Upsample         params=        0  out=(1, 512, 40, 40)
+  [12] f=[-1, 6]        Concat           params=        0  out=(1, 1024, 40, 40)
+  [13] f=-1             C3k2             params=  1642496  out=(1, 512, 40, 40)
+  [14] f=-1             Upsample         params=        0  out=(1, 512, 80, 80)
+  [15] f=[-1, 4]        Concat           params=        0  out=(1, 1024, 80, 80)
+  [16] f=-1             C3k2             params=   542720  out=(1, 256, 80, 80)
+  [17] f=-1             Conv             params=   590336  out=(1, 256, 40, 40)
+  [18] f=[-1, 13]       Concat           params=        0  out=(1, 768, 40, 40)
+  [19] f=-1             C3k2             params=  1511424  out=(1, 512, 40, 40)
+  [20] f=-1             Conv             params=  2360320  out=(1, 512, 20, 20)
+  [21] f=[-1, 10]       Concat           params=        0  out=(1, 1024, 20, 20)
+  [22] f=-1             C3k2             params=  1974784  out=(1, 512, 20, 20)
+  [23] f=[16, 19, 22]   Segment26        params=  7995679  out=['tuple', 'dict']
+
+=== HEAD: Segment26 ===
+  nc = 1
+  no = 5
+  reg_max = 1
+  nm = 32
+  npr = 256
+  stride = [8.0, 16.0, 32.0]
+  end2end = True
+  max_det = 300
+  dynamic = False
+  shape = torch.Size([1, 256, 80, 80])
+  submodules:
+    cv2            ModuleList     params=849420
+    cv3            ModuleList     params=550659
+    dfl            Identity       params=0
+    one2one_cv2    ModuleList     params=849420
+    one2one_cv3    ModuleList     params=550659
+    proto          Proto26        params=3485761
+    cv4            ModuleList     params=854880
+    one2one_cv4    ModuleList     params=854880

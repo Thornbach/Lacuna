@@ -1,0 +1,9 @@
+# Normalize line endings: store LF in the repo, check out native.
+* text=auto
+
+# Treat model/weight formats as binary (belt-and-suspenders; they're gitignored).
+*.onnx binary
+*.safetensors binary
+*.mpk binary
+*.npz binary
+*.png binary

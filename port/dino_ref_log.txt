@@ -1,0 +1,15 @@
+﻿mean: [0.485 0.456 0.406] std: [0.229 0.224 0.225] | mul_2: (1024, 2, 16) float32
+ONNX out: (1, 1024, 1536) range -0.7810120582580566 0.2705923318862915 | per-patch L2 of first 768: 0.9999998807907104
+python.exe : 
+At line:2 char:1
++ & E:/Program_Files/Conda/python.exe "e:\PhD_TobiMu\02_code\FoliarTool ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Loading weights:   0%|          | 0/211 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 211/211 [00:00<00:00, 6095.70it/s]
+num hidden_states: 13 each (1, 1029, 768)
+HF multilayer feat: (1, 1024, 1536)
+ONNX vs HF multilayer: max|Δ|=3.765e-06 mean|Δ|=5.501e-08
+saved -> dino_ref.npz

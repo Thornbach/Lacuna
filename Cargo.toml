@@ -1,0 +1,75 @@
+[package]
+name = "lacuna"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tobias Müller"]
+description = "Lacuna — a Rust toolkit for reading leaves: segmentation, anomaly detection, reconstruction, and shape-complexity morphology."
+
+[[bin]]
+name = "lacuna"
+path = "src/main.rs"
+
+# ── Backend feature flags ──────────────────────────────────────────────────────
+# ALL nets (DINOv3, YOLO26, recon) now run on BURN — one backend, no onnxruntime.
+# cuda     (default) — NVIDIA GPU via CUDA driver + nvrtc.  No cuDNN, no ort DLLs.
+# wgpu-gpu           — GPU via Vulkan/DX12/Metal (cross-platform, no CUDA needed).
+# <none>             — CPU via burn's ndarray backend.  Slow but fully portable.
+#
+# Windows GPU:       cargo build --release                (uses cuda, self-contained)
+# Cross-platform GPU:cargo build --release --no-default-features --features wgpu-gpu
+# Portable CPU demo: cargo build --release --no-default-features
+#
+# ort-backend/ort-cuda/directml — OPTIONAL: re-add the old ONNX Runtime path (and its
+#   native DLLs) as a fallback. Compile it, then set LACUNA_USE_ORT=1 to select ort.
+[features]
+default  = ["cuda"]
+# ── BURN backends (DINOv3 + YOLO26 run pure-Rust; NO onnxruntime/cuDNN DLLs) ──
+cuda     = ["dep:burn-cuda"]   # NVIDIA GPU via CUDA driver + nvrtc (no cuDNN)
+wgpu-gpu = ["burn/wgpu"]       # any GPU via Vulkan/DX12/Metal
+# ── Optional ONNX Runtime fallback ──────────────────────────────────────────
+# DINO/YOLO now DEFAULT to the BURN reimplementations. `ort-backend` re-adds the
+# ort path (and the onnxruntime native DLLs); with it compiled, set
+# LACUNA_USE_ORT=1 at runtime to select ort instead of BURN.
+ort-backend = ["dep:ort"]                      # ort CPU EP
+ort-cuda    = ["ort-backend", "ort/cuda"]      # + CUDA EP (needs cuDNN)
+directml    = ["ort-backend", "ort/directml"]  # + DirectML EP (no cuDNN)
+
+[dependencies]
+eframe     = { version = "0.29", features = ["persistence"] }
+egui       = "0.29"
+image      = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
+rayon      = "1"
+rfd        = "0.14"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir    = "2"
+rand       = { version = "0.8", features = ["small_rng"] }
+dirs       = "5"
+# ndarray always compiled in — provides the CPU fallback path.
+burn       = { version = "0.16", default-features = false, features = ["autodiff", "ndarray"] }
+burn-core  = "0.16"
+burn-cuda  = { version = "0.16", optional = true }
+egui_plot  = "0.29"
+egui_extras = "0.29"
+egui-phosphor = "0.7"   # icon font (matches egui 0.29) for the nav rail + buttons
+# ShapeComplexity (EC/MC leaf morphology) — egui-free analysis lib reused for the
+# Morphology tab. It pins image 0.24 internally; we only cross the boundary with
+# raw RGBA bytes + scalars (see leaf_complex_rust::analyze), so the version differs
+# harmlessly from our image 0.25.
+leaf_complex_rust_lib = { path = "../ShapeComplexity", package = "leaf_complex_rust" }
+# ONNX Runtime — now OPTIONAL (the BURN reimplementations of DINOv3 + YOLO26 are
+# the default). Only pulled in by the `ort-backend`/`ort-cuda`/`directml` features;
+# without them the app ships with zero onnxruntime/cuDNN DLLs. 2.x is prerelease so
+# pin explicitly.
+ort        = { version = "=2.0.0-rc.10", optional = true }
+# Pure-Rust weight loading for the hand-written BURN DINOv3 reimplementation
+# (port/ → dino_burn.rs). No burn-import; we map safetensors → burn Tensors by name.
+safetensors = "0.4"
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
