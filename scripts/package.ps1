@@ -5,7 +5,7 @@
     dist/Lacuna-v<ver>/        lacuna.exe + models\ (weights) + licenses
     dist/Lacuna-v<ver>.zip     the zip users download
 
-  Users just extract and double-click lacuna.exe — no Python, no Hugging Face,
+  Users just extract and double-click lacuna.exe -- no Python, no Hugging Face,
   no tokens, no .onnx. The BURN backends load the bundled .safetensors directly.
 
   Usage:
@@ -24,7 +24,7 @@ if (-not $Version) {
 }
 Write-Host "Packaging Lacuna v$Version" -ForegroundColor Cyan
 
-# 1. Build (release, default features = cuda → self-contained, no onnxruntime).
+# 1. Build (release, default features = cuda -> self-contained, no onnxruntime).
 if (-not $SkipBuild) {
     Write-Host "Building release..." -ForegroundColor Cyan
     & cargo build --release --manifest-path (Join-Path $root "Cargo.toml")
@@ -42,7 +42,7 @@ New-Item -ItemType Directory -Force -Path `
 # 3. Executable.
 Copy-Item $exe $stage
 
-# 4. Runtime weights (BURN needs only these — the big .onnx are NOT included).
+# 4. Runtime weights (BURN needs only these -- the big .onnx are NOT included).
 $models = Join-Path $root "models"
 $need = @(
     @{ src = "dino_weights.safetensors"; dst = "models\dino_weights.safetensors" },
@@ -68,7 +68,7 @@ try {
     Write-Host "Fetched DINOv3 license." -ForegroundColor Green
 }
 catch {
-    Write-Warning "Could not fetch DINOv3 license — add LICENSES\DINOv3-LICENSE.md by hand before distributing."
+    Write-Warning "Could not fetch DINOv3 license -- add LICENSES\DINOv3-LICENSE.md by hand before distributing."
 }
 
 # 6. Zip.
@@ -76,5 +76,5 @@ $zip = Join-Path $root "dist\Lacuna-v$Version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-Write-Host "Done → $zip ($mb MB)" -ForegroundColor Green
+Write-Host "Done -> $zip ($mb MB)" -ForegroundColor Green
 Write-Host "  Contents: lacuna.exe + models\ + licenses. Users extract & run lacuna.exe." -ForegroundColor Green
