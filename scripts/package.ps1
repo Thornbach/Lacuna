@@ -8,11 +8,16 @@
   Users just extract and double-click lacuna.exe -- no Python, no Hugging Face,
   no tokens, no .onnx. The BURN backends load the bundled .safetensors directly.
 
+  Variants:
+    gpu  (default)  cuda / NVIDIA GPU     -> Lacuna-v<ver>-gpu.zip   (fast)
+    cpu             ndarray, portable     -> Lacuna-v<ver>-cpu.zip   (no GPU needed, slow)
+
   Usage:
-    powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Version 0.1.0] [-SkipBuild]
+    powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Variant gpu|cpu] [-Version 0.1.0] [-SkipBuild]
 #>
 param(
     [string]$Version,
+    [ValidateSet("gpu", "cpu")][string]$Variant = "gpu",
     [switch]$SkipBuild
 )
 $ErrorActionPreference = "Stop"
@@ -22,19 +27,25 @@ if (-not $Version) {
     $m = Select-String -Path (Join-Path $root "Cargo.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
     $Version = if ($m) { $m.Matches[0].Groups[1].Value } else { "0.0.0" }
 }
-Write-Host "Packaging Lacuna v$Version" -ForegroundColor Cyan
+Write-Host "Packaging Lacuna v$Version ($Variant)" -ForegroundColor Cyan
 
-# 1. Build (release, default features = cuda -> self-contained, no onnxruntime).
+# 1. Build. gpu = default features (cuda, self-contained); cpu = ndarray (portable, no GPU).
 if (-not $SkipBuild) {
-    Write-Host "Building release..." -ForegroundColor Cyan
-    & cargo build --release --manifest-path (Join-Path $root "Cargo.toml")
+    Write-Host "Building release ($Variant)..." -ForegroundColor Cyan
+    $manifest = Join-Path $root "Cargo.toml"
+    if ($Variant -eq "cpu") {
+        & cargo build --release --no-default-features --manifest-path $manifest
+    }
+    else {
+        & cargo build --release --manifest-path $manifest
+    }
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
 $exe = Join-Path $root "target\release\lacuna.exe"
 if (-not (Test-Path $exe)) { throw "exe not found: $exe (build first, or drop -SkipBuild)" }
 
 # 2. Staging tree.
-$stage = Join-Path $root "dist\Lacuna-v$Version"
+$stage = Join-Path $root "dist\Lacuna-v$Version-$Variant"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path `
     $stage, (Join-Path $stage "models\recon"), (Join-Path $stage "LICENSES") | Out-Null
@@ -72,7 +83,7 @@ catch {
 }
 
 # 6. Zip.
-$zip = Join-Path $root "dist\Lacuna-v$Version.zip"
+$zip = Join-Path $root "dist\Lacuna-v$Version-$Variant.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
