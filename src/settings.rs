@@ -178,205 +178,6 @@ impl Default for SorterSettings {
     }
 }
 
-// ── recon-train settings ──────────────────────────────────────────────────────
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ReconTrainSettings {
-    pub last_source_folder:  Option<PathBuf>,
-    pub last_output_folder:  Option<PathBuf>,
-    pub species_label:       String,
-    pub damage_levels:       u32,
-    pub damage_min_pct:      f32,
-    pub damage_max_pct:      f32,
-    pub coastal_enabled:     bool,
-    pub spots_enabled:       bool,
-    pub snake_enabled:       bool,
-    pub coastal_weight:      f32,
-    pub spots_weight:        f32,
-    pub snake_weight:        f32,
-    pub epochs:              usize,
-    pub batch_size:          usize,
-    pub learning_rate:       f64,
-    pub l1_lambda:           f32,
-    pub checkpoint_every:    usize,
-    pub sample_grid_every:   usize,
-    pub train_val_split:     f32,
-    pub image_size_px:       u32,
-    /// Probability [0, 1] that a training sample is presented undamaged.
-    /// Teaches the model the identity mapping (no reconstruction needed).
-    #[serde(default = "ReconTrainSettings::default_zero_damage_prob")]
-    pub zero_damage_prob:        f32,
-    /// Save a mid-batch checkpoint every N steps (0 = disabled).
-    /// Limits work lost on GPU stall/crash to at most N batches.
-    #[serde(default = "ReconTrainSettings::default_batch_checkpoint_every")]
-    pub batch_checkpoint_every:  usize,
-    /// Large interior ellipses (radius 15–50 px) at any leaf location.
-    #[serde(default = "ReconTrainSettings::default_ellipses_enabled")]
-    pub ellipses_enabled: bool,
-    #[serde(default = "ReconTrainSettings::default_ellipses_weight")]
-    pub ellipses_weight:  f32,
-    /// Apex/tip removal: per-sample probability of applying a bbox-side strip cut.
-    #[serde(default = "ReconTrainSettings::default_apex_enabled")]
-    pub apex_enabled: bool,
-    #[serde(default = "ReconTrainSettings::default_apex_weight")]
-    pub apex_weight:  f32,
-    /// Curriculum learning: ramp from min_pct → curriculum_max_pct over this
-    /// many epochs, then use full max_pct. 0 = full damage range from epoch 0.
-    #[serde(default = "ReconTrainSettings::default_curriculum_epochs")]
-    pub curriculum_epochs:  usize,
-    /// Maximum damage % reached at the END of the curriculum phase.
-    #[serde(
-        default = "ReconTrainSettings::default_curriculum_max_pct",
-        alias  = "curriculum_start_max_pct"   // compat with old settings files
-    )]
-    pub curriculum_max_pct: f32,
-    /// Reconstruction-only pre-training phase: run this many epochs with no
-    /// adversarial loss before enabling the GAN discriminator. 0 = disabled.
-    #[serde(default = "ReconTrainSettings::default_pretrain_epochs")]
-    pub pretrain_epochs:          usize,
-    /// D learning rate = G LR × d_lr_factor.  < 1.0 slows D relative to G.
-    #[serde(default = "ReconTrainSettings::default_d_lr_factor")]
-    pub d_lr_factor:              f64,
-    /// Clustered margin damage: 1–3 focused bite zones along the leaf border.
-    #[serde(default = "ReconTrainSettings::default_clusters_enabled")]
-    pub clusters_enabled: bool,
-    #[serde(default = "ReconTrainSettings::default_clusters_weight")]
-    pub clusters_weight:  f32,
-    /// Whole-lobe removal: 1–3 circular disc bites centred on the leaf margin.
-    #[serde(default = "ReconTrainSettings::default_lobe_enabled")]
-    pub lobe_enabled: bool,
-    #[serde(default = "ReconTrainSettings::default_lobe_weight")]
-    pub lobe_weight:  f32,
-    /// Half-plane sector removal targeting concentrated single-side damage.
-    #[serde(default = "ReconTrainSettings::default_focal_sector_enabled")]
-    pub focal_sector_enabled: bool,
-    #[serde(default = "ReconTrainSettings::default_focal_sector_weight")]
-    pub focal_sector_weight:  f32,
-    /// Loss weight multiplier applied to pixels that need reconstruction
-    /// (GT=1 but input alpha=0). Upweights the damaged region so the model
-    /// can't minimise loss by copying the input. Default 7.0.
-    #[serde(default = "ReconTrainSettings::default_recon_focus_weight")]
-    pub recon_focus_weight: f32,
-    /// Multiplier applied to the adversarial loss component in the generator step.
-    /// Boosts adversarial gradient relative to reconstruction — prevents generator
-    /// from ignoring D entirely. Default 20.0.
-    #[serde(default = "ReconTrainSettings::default_adv_lambda")]
-    pub adv_lambda: f32,
-    /// Weight on Total Variation loss applied to G's sigmoid output.
-    /// Suppresses checkerboard from ConvTranspose2d and high adv_lambda. Default 0.02.
-    #[serde(default = "ReconTrainSettings::default_tv_lambda")]
-    pub tv_lambda: f32,
-    /// Weight on the confidence (entropy minimisation) loss.
-    /// Penalises predictions near 0.5 — pushes G toward committed 0/1 outputs.
-    /// Default 0.5.
-    #[serde(default = "ReconTrainSettings::default_conf_lambda")]
-    pub conf_lambda: f32,
-    /// Enable adaptive GAN controller. Monitors d_real/d_fake rolling means
-    /// and adjusts adv_lambda, conf_lambda, d_lr within bounds to maintain
-    /// healthy GAN dynamics. Default true.
-    #[serde(default = "ReconTrainSettings::default_adaptive_ctrl")]
-    pub adaptive_ctrl: bool,
-
-    #[serde(default = "ReconTrainSettings::default_ms_lambda")]
-    pub ms_lambda:               f32,
-    #[serde(default = "ReconTrainSettings::default_sym_lambda")]
-    pub sym_lambda:              f32,
-    /// Tversky FP weight α. > 0.5 penalises over-prediction. Default 0.7.
-    #[serde(default = "ReconTrainSettings::default_tversky_alpha")]
-    pub tversky_alpha: f32,
-    /// Tversky FN weight β. < 0.5 tolerates under-prediction. Default 0.3.
-    #[serde(default = "ReconTrainSettings::default_tversky_beta")]
-    pub tversky_beta:  f32,
-    /// Pixels to zero out inward from the damage boundary on the intact side.
-    /// Forces long-range reasoning rather than boundary interpolation. Default 0.
-    #[serde(default)]
-    pub boundary_exclusion_px: usize,
-    #[serde(default = "ReconTrainSettings::default_accum_steps")]
-    pub accum_steps: usize,
-}
-
-impl ReconTrainSettings {
-    fn default_zero_damage_prob()            -> f32   { 0.30 }
-    fn default_batch_checkpoint_every()      -> usize { 200  }
-    fn default_accum_steps()                 -> usize { 1    }
-    fn default_ellipses_enabled()            -> bool  { false }
-    fn default_ellipses_weight()             -> f32   { 0.5  }
-    fn default_apex_enabled()                -> bool  { false }
-    fn default_apex_weight()                 -> f32   { 0.4  }
-    fn default_curriculum_epochs()           -> usize { 60   }
-    fn default_curriculum_max_pct()          -> f32   { 40.0 }
-    fn default_pretrain_epochs()             -> usize { 0    }
-    fn default_d_lr_factor()                 -> f64   { 0.5  }
-    fn default_clusters_enabled()            -> bool  { true }
-    fn default_clusters_weight()             -> f32   { 0.6  }
-    fn default_lobe_enabled()                -> bool  { true }
-    fn default_lobe_weight()                 -> f32   { 0.5  }
-    fn default_focal_sector_enabled()        -> bool  { true }
-    fn default_focal_sector_weight()         -> f32   { 1.0  }
-    fn default_recon_focus_weight()          -> f32   { 4.0  }
-    fn default_adv_lambda()                  -> f32   { 20.0 }
-    fn default_tv_lambda()                   -> f32   { 0.02 }
-    fn default_adaptive_ctrl()               -> bool  { true  }
-    fn default_conf_lambda()                 -> f32   { 0.5  }
-    fn default_ms_lambda()               -> f32   { 0.0  }
-    fn default_sym_lambda()              -> f32   { 0.0  }
-    fn default_tversky_alpha()           -> f32   { 0.7  }
-    fn default_tversky_beta()            -> f32   { 0.3  }
-}
-
-impl Default for ReconTrainSettings {
-    fn default() -> Self {
-        Self {
-            last_source_folder:  None,
-            last_output_folder:  None,
-            species_label:       "Quercus".to_string(),
-            damage_levels:       20,
-            damage_min_pct:      2.0,
-            damage_max_pct:      40.0,
-            coastal_enabled:     true,
-            spots_enabled:       false,
-            snake_enabled:       true,
-            coastal_weight:      0.7,
-            spots_weight:        0.3,
-            snake_weight:        0.0,
-            epochs:              100,
-            batch_size:          2,
-            learning_rate:       2e-4,
-            l1_lambda:           0.5,
-            checkpoint_every:    10,
-            sample_grid_every:   5,
-            train_val_split:     0.9,
-            image_size_px:       512,
-            zero_damage_prob:       0.30,
-            batch_checkpoint_every: 200,
-            ellipses_enabled:           false,
-            ellipses_weight:            0.5,
-            apex_enabled:               false,
-            apex_weight:                0.4,
-            curriculum_epochs:          60,
-            curriculum_max_pct:         40.0,
-            pretrain_epochs:            0,
-            d_lr_factor:                0.5,
-            clusters_enabled:           true,
-            clusters_weight:            0.6,
-            lobe_enabled:               true,
-            lobe_weight:                0.5,
-            focal_sector_enabled:       true,
-            focal_sector_weight:        1.0,
-            recon_focus_weight:         4.0,
-            adv_lambda:                 20.0,
-            tv_lambda:                  0.02,
-            conf_lambda:                0.5,
-            adaptive_ctrl:              true,
-            ms_lambda:                0.0,
-            sym_lambda:               0.0,
-            tversky_alpha:            0.7,
-            tversky_beta:             0.3,
-            boundary_exclusion_px:    0,
-            accum_steps:              1,
-        }
-    }
-}
 
 // ── recon-infer settings ──────────────────────────────────────────────────────
 
@@ -529,6 +330,22 @@ pub struct ReconSimpleSettings {
     /// Adversarial loss weight in the generator step.
     #[serde(default = "ReconSimpleSettings::default_adv_lambda")]
     pub adv_lambda: f32,
+    /// Cosine LR schedule floor, as a fraction of `learning_rate`, reached at
+    /// the final epoch. 1.0 = flat LR (no decay).
+    #[serde(default = "ReconSimpleSettings::default_lr_min_frac")]
+    pub lr_min_frac: f64,
+    /// 0-indexed epoch to resume at (only applied when a resume checkpoint is
+    /// picked). Auto-filled from the checkpoint's `epoch_info.txt` if present.
+    #[serde(default)]
+    pub start_epoch: usize,
+    /// Best val IoU already achieved before a resume, so a worse early epoch
+    /// post-resume can't clobber an existing checkpoint_best.
+    #[serde(default)]
+    pub resume_best_iou: f32,
+    /// Weight on the hole-consistency loss (penalises invented interior holes
+    /// in the predicted silhouette). 0 = disabled.
+    #[serde(default = "ReconSimpleSettings::default_hole_lambda")]
+    pub hole_lambda: f32,
 }
 
 impl ReconSimpleSettings {
@@ -537,6 +354,8 @@ impl ReconSimpleSettings {
     fn default_pretrain_epochs()      -> usize { 10   }
     fn default_d_lr_factor()          -> f64   { 0.5  }
     fn default_adv_lambda()           -> f32   { 20.0 }
+    fn default_lr_min_frac()          -> f64   { 0.05 }
+    fn default_hole_lambda()          -> f32   { 3.0  }
 }
 
 impl Default for ReconSimpleSettings {
@@ -578,6 +397,10 @@ impl Default for ReconSimpleSettings {
             pretrain_epochs:       10,
             d_lr_factor:           0.5,
             adv_lambda:            20.0,
+            lr_min_frac:           0.05,
+            start_epoch:           0,
+            resume_best_iou:       0.0,
+            hole_lambda:           3.0,
         }
     }
 }
@@ -632,18 +455,33 @@ pub struct PipelineSettings {
     /// Use the few-shot head instead of the PatchCore bank (when a head is set).
     #[serde(default = "default_true")]
     pub use_fewshot:        bool,
+    /// ALSO run the PatchCore bank alongside the few-shot head (open-set safety
+    /// net for anomaly types the head was never trained on). Off by default —
+    /// only worth enabling once the bank reflects real healthy data, otherwise
+    /// it mostly surfaces its own uncalibrated false positives.
+    #[serde(default)]
+    pub use_patchcore:      bool,
     /// Few-shot defect-probability threshold τ (hysteresis SEED).
     #[serde(default = "default_head_tau")]
     pub head_tau:           f32,
     /// Few-shot hysteresis GROW threshold (higher = tighter regions).
     #[serde(default = "default_head_grow")]
     pub head_grow:          f32,
+    /// DBSCAN radius over standardized region descriptors (PatchCore clustering
+    /// only). Lower = more, smaller, possibly-overlapping-in-meaning clusters.
+    #[serde(default = "default_cluster_eps")]
+    pub cluster_eps:        f32,
+    /// DBSCAN min points. Lower = more, smaller, looser clusters.
+    #[serde(default = "default_cluster_min_pts")]
+    pub cluster_min_pts:    usize,
 }
 
 fn default_margin_erode() -> u32 { 6 }
 fn default_true() -> bool { true }
 fn default_head_tau() -> f32 { 0.85 }
 fn default_head_grow() -> f32 { 0.7 }
+fn default_cluster_eps() -> f32 { 1.5 }
+fn default_cluster_min_pts() -> usize { 5 }
 
 impl Default for PipelineSettings {
     fn default() -> Self {
@@ -662,8 +500,11 @@ impl Default for PipelineSettings {
             recon_ckpt:         None,
             head_path:          None,
             use_fewshot:        true,
+            use_patchcore:      false,
             head_tau:           0.85,
             head_grow:          0.7,
+            cluster_eps:        1.5,
+            cluster_min_pts:    5,
         }
     }
 }
@@ -761,8 +602,6 @@ pub struct AppSettings {
     pub eroder:       EroderSettings,
     pub sorter:       SorterSettings,
     #[serde(default)]
-    pub recon_train:  ReconTrainSettings,
-    #[serde(default)]
     pub recon_infer:  ReconInferSettings,
     #[serde(default)]
     pub recon_area:   ReconAreaSettings,
@@ -791,7 +630,6 @@ impl Default for AppSettings {
             defaults:     AppDefaults::default(),
             eroder:       EroderSettings::default(),
             sorter:       SorterSettings::default(),
-            recon_train:  ReconTrainSettings::default(),
             recon_infer:  ReconInferSettings::default(),
             recon_area:   ReconAreaSettings::default(),
             recon_simple: ReconSimpleSettings::default(),

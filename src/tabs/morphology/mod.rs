@@ -184,53 +184,6 @@ impl MorphologyTab {
         }
         ui.label(RichText::new(path_str(&self.output)).small().color(Color32::GRAY));
 
-        ui_kit::section_header(ui, "Parameters");
-        egui::Grid::new("morph_params").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Reference:");
-            egui::ComboBox::from_id_salt("morph_ref")
-                .selected_text(match self.config.reference_point_choice {
-                    ReferencePointChoice::Com => "Center of Mass",
-                    ReferencePointChoice::Ep => "Emerge Point",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.config.reference_point_choice,
-                        ReferencePointChoice::Com,
-                        "Center of Mass",
-                    );
-                    ui.selectable_value(
-                        &mut self.config.reference_point_choice,
-                        ReferencePointChoice::Ep,
-                        "Emerge Point",
-                    );
-                });
-            ui.end_row();
-
-            ui.label("Resize:");
-            let mut resize_on = self.config.resize_dimensions.is_some();
-            ui.horizontal(|ui| {
-                if ui.checkbox(&mut resize_on, "").changed() {
-                    self.config.resize_dimensions = if resize_on { Some([512, 512]) } else { None };
-                }
-                if let Some(dims) = self.config.resize_dimensions.as_mut() {
-                    ui.add(egui::DragValue::new(&mut dims[0]).range(64..=2048).speed(16));
-                    dims[1] = dims[0]; // keep square
-                    ui.label("px");
-                }
-            });
-            ui.end_row();
-
-            ui.label("Opening density:")
-                .on_hover_text("adaptive_opening_max_density — pink-region marking sensitivity.");
-            ui.add(egui::Slider::new(&mut self.config.adaptive_opening_max_density, 10.0..=100.0));
-            ui.end_row();
-
-            ui.label("MC smoothing:")
-                .on_hover_text("thornfiddle_smoothing_strength — macro-shape signal smoothing.");
-            ui.add(egui::Slider::new(&mut self.config.thornfiddle_smoothing_strength, 0.0..=10.0));
-            ui.end_row();
-        });
-
         ui_kit::section_header(ui, "Analyze");
         let can = !self.paths.is_empty() && !self.running;
         ui.add_enabled_ui(can, |ui| {
@@ -304,6 +257,55 @@ impl MorphologyTab {
                     }
                 });
             }
+        });
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        ui_kit::section_header(ui, "Parameters");
+        egui::Grid::new("morph_params").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Reference:");
+            egui::ComboBox::from_id_salt("morph_ref")
+                .selected_text(match self.config.reference_point_choice {
+                    ReferencePointChoice::Com => "Center of Mass",
+                    ReferencePointChoice::Ep => "Emerge Point",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.config.reference_point_choice,
+                        ReferencePointChoice::Com,
+                        "Center of Mass",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.reference_point_choice,
+                        ReferencePointChoice::Ep,
+                        "Emerge Point",
+                    );
+                });
+            ui.end_row();
+
+            ui.label("Resize:");
+            let mut resize_on = self.config.resize_dimensions.is_some();
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut resize_on, "").changed() {
+                    self.config.resize_dimensions = if resize_on { Some([512, 512]) } else { None };
+                }
+                if let Some(dims) = self.config.resize_dimensions.as_mut() {
+                    ui.add(egui::DragValue::new(&mut dims[0]).range(64..=2048).speed(16));
+                    dims[1] = dims[0]; // keep square
+                    ui.label("px");
+                }
+            });
+            ui.end_row();
+
+            ui.label("Opening density:")
+                .on_hover_text("adaptive_opening_max_density — pink-region marking sensitivity.");
+            ui.add(egui::Slider::new(&mut self.config.adaptive_opening_max_density, 10.0..=100.0));
+            ui.end_row();
+
+            ui.label("MC smoothing:")
+                .on_hover_text("thornfiddle_smoothing_strength — macro-shape signal smoothing.");
+            ui.add(egui::Slider::new(&mut self.config.thornfiddle_smoothing_strength, 0.0..=10.0));
+            ui.end_row();
         });
     }
 

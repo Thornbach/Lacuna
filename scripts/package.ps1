@@ -59,7 +59,9 @@ $need = @(
     @{ src = "dino_weights.safetensors"; dst = "models\dino_weights.safetensors" },
     @{ src = "yolo_weights.safetensors"; dst = "models\yolo_weights.safetensors" },
     @{ src = "fewshot_head.json";        dst = "models\fewshot_head.json" },
-    @{ src = "recon\gen.mpk";            dst = "models\recon\gen.mpk" }
+    @{ src = "recon\gen.mpk";            dst = "models\recon\gen.mpk" },
+    @{ src = "coreset_bank.bin";         dst = "models\coreset_bank.bin" },
+    @{ src = "detector_meta.json";       dst = "models\detector_meta.json" }
 )
 foreach ($f in $need) {
     $s = Join-Path $models $f.src

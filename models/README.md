@@ -15,15 +15,20 @@ The pure-Rust backends load these directly; **no `.onnx`, no ONNX Runtime, no cu
 | `yolo_weights.safetensors`  | YOLO26-seg leaf segmentation. ~90 MB. |
 | `fewshot_head.json`         | Few-shot detection head (the detector; tiny, tracked in git). |
 | `recon/gen.mpk`             | Reconstruction U-Net checkpoint. ~59 MB. |
+| `coreset_bank.bin`          | PatchCore coreset bank — open-set "novel anomaly" safety net, used alongside the few-shot head when enabled (Pipeline → "Also run PatchCore"). ~920 MB. **New as of v0.2** — previous releases never bundled this. |
+| `detector_meta.json`        | PatchCore calibration (thresholds/scale) that pairs with `coreset_bank.bin`; tiny, tracked in git. |
 
 Small config JSONs here are versioned in git; the multi-hundred-MB weights are **not**
 (they're gitignored). A packaged release bundles all of the above — end users get them
-automatically and never touch this folder.
+automatically and never touch this folder. Bundling the PatchCore bank roughly doubles
+the download size versus v0.1 — it's optional at runtime (off by default, opt-in via
+the Pipeline tab) but shipped by default now so it's available without a separate
+download.
 
 ## Getting the weights (developers building from source)
 
-- **`yolo_weights.safetensors` + `recon/gen.mpk`** — download from the repo's GitHub
-  Release and drop them here.
+- **`yolo_weights.safetensors` + `recon/gen.mpk` + `coreset_bank.bin` +
+  `detector_meta.json`** — download from the repo's GitHub Release and drop them here.
 - **`dino_weights.safetensors`** — regenerate from the public DINOv3 model (its license
   requires you to accept Meta's terms once, so it isn't redistributed in the source repo):
   ```powershell

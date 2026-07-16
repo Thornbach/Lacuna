@@ -1,7 +1,7 @@
 use burn::{
     module::Module,
     nn::{
-        conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
+        conv::{Conv2d, Conv2dConfig},
         Dropout, DropoutConfig,
         Embedding, EmbeddingConfig,
         GroupNorm, GroupNormConfig, Linear, LinearConfig, PaddingConfig2d,
@@ -335,54 +335,3 @@ impl<B: Backend> UNetGenerator<B> {
     }
 }
 
-// ── PatchGAN Discriminator ────────────────────────────────────────────────────
-//
-// Input:  concat(cond [B,5,H,W], target [B,1,H,W]) → [B, 6, H, W]
-// Output: [B, 1, patch_h, patch_w]  un-activated patch scores
-// GroupNorm(8) used instead of BatchNorm — stable at any batch size (1–8),
-// no running-stat accumulation issues when D receives one real + one fake pair.
-
-#[derive(Module, Debug)]
-pub struct PatchDiscriminator<B: Backend> {
-    c1: Conv2d<B>,
-    c2: Conv2d<B>, n2: GroupNorm<B>,
-    c3: Conv2d<B>, n3: GroupNorm<B>,
-    c4: Conv2d<B>, n4: GroupNorm<B>,
-    c5: Conv2d<B>,
-}
-
-impl<B: Backend> PatchDiscriminator<B> {
-    pub fn init(in_cond_channels: usize, device: &B::Device) -> Self {
-        let total_in = in_cond_channels + 1;
-        let s2 = |ic, oc| Conv2dConfig::new([ic, oc], [4, 4])
-            .with_stride([2, 2])
-            .with_padding(PaddingConfig2d::Explicit(1, 1))
-            .with_bias(false);
-        let s1 = |ic, oc| Conv2dConfig::new([ic, oc], [4, 4])
-            .with_stride([1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1))
-            .with_bias(false);
-        let gn = |ch| GroupNormConfig::new(8, ch);
-
-        Self {
-            c1: s2(total_in,  32).with_bias(true).init(device),
-            c2: s2(32,   64).init(device), n2: gn(64).init(device),
-            c3: s2(64,  128).init(device), n3: gn(128).init(device),
-            c4: s1(128, 256).init(device), n4: gn(256).init(device),
-            c5: s1(256,   1).with_bias(true).init(device),
-        }
-    }
-
-    pub fn gpu_fence(&self) -> Tensor<B, 1> {
-        self.c1.weight.val().flatten::<1>(0, 3).mean()
-    }
-
-    pub fn forward(&self, cond: Tensor<B, 4>, target: Tensor<B, 4>) -> Tensor<B, 4> {
-        let x = Tensor::cat(vec![cond, target], 1);
-        let x = leaky_relu(self.c1.forward(x));
-        let x = leaky_relu(self.n2.forward(self.c2.forward(x)));
-        let x = leaky_relu(self.n3.forward(self.c3.forward(x)));
-        let x = leaky_relu(self.n4.forward(self.c4.forward(x)));
-        self.c5.forward(x)
-    }
-}

@@ -153,26 +153,6 @@ impl TrainTab {
                 self.pick_row(ui, "DINOv3 model (.onnx)", Pick::Dino);
                 self.pick_row(ui, "Output folder", Pick::Out);
 
-                ui_kit::section_header(ui, "Parameters");
-                egui::Grid::new("train_params").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                    ui.label("Coreset size:");
-                    ui.add(egui::DragValue::new(&mut self.coreset_target).range(1000..=1_000_000).speed(1000));
-                    ui.end_row();
-                    ui.label("Fit tiles:");
-                    ui.add(egui::DragValue::new(&mut self.n_fit).range(50..=100_000).speed(50));
-                    ui.end_row();
-                    ui.label("Calibration tiles:");
-                    ui.add(egui::DragValue::new(&mut self.n_calib).range(20..=5000).speed(10));
-                    ui.end_row();
-                    ui.label("Max FP rate:")
-                        .on_hover_text("Fraction of clean pixels allowed to fire. Lower = stricter.");
-                    ui.add(egui::Slider::new(&mut self.max_fp_rate, 0.0001..=0.01).logarithmic(true));
-                    ui.end_row();
-                    ui.label("Margin erode (px):");
-                    ui.add(egui::Slider::new(&mut self.margin_erode, 0..=20));
-                    ui.end_row();
-                });
-
                 ui.add_space(10.0);
                 let can_start = self.ready() && !self.running;
                 ui.add_enabled_ui(can_start, |ui| {
@@ -242,6 +222,28 @@ impl TrainTab {
                     ui.label(RichText::new(line).small());
                 }
             });
+        });
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        ui_kit::section_header(ui, "Parameters");
+        egui::Grid::new("train_params").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Coreset size:");
+            ui.add(egui::DragValue::new(&mut self.coreset_target).range(1000..=1_000_000).speed(1000));
+            ui.end_row();
+            ui.label("Fit tiles:");
+            ui.add(egui::DragValue::new(&mut self.n_fit).range(50..=100_000).speed(50));
+            ui.end_row();
+            ui.label("Calibration tiles:");
+            ui.add(egui::DragValue::new(&mut self.n_calib).range(20..=5000).speed(10));
+            ui.end_row();
+            ui.label("Max FP rate:")
+                .on_hover_text("Fraction of clean pixels allowed to fire. Lower = stricter.");
+            ui.add(egui::Slider::new(&mut self.max_fp_rate, 0.0001..=0.01).logarithmic(true));
+            ui.end_row();
+            ui.label("Margin erode (px):");
+            ui.add(egui::Slider::new(&mut self.margin_erode, 0..=20));
+            ui.end_row();
         });
     }
 

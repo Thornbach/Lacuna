@@ -176,38 +176,7 @@ impl LeafSegTab {
         }
         ui.label(RichText::new(path_str(&self.output_folder)).small().color(Color32::GRAY));
 
-        ui_kit::section_header(ui, "Settings");
-        egui::Grid::new("leafseg_settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Confidence:");
-            ui.add(egui::Slider::new(&mut self.conf, 0.0..=1.0).fixed_decimals(2));
-            ui.end_row();
-            ui.label("Image size:");
-            egui::ComboBox::from_id_salt("leafseg_imgsz")
-                .selected_text(format!("{}", self.imgsz))
-                .show_ui(ui, |ui| {
-                    for sz in [320u32, 640, 960, 1280] {
-                        ui.selectable_value(&mut self.imgsz, sz, format!("{sz}"));
-                    }
-                });
-            ui.end_row();
-            ui.label("Cutout edge:")
-                .on_hover_text("Cutout edge tightness (alpha feather start).\n\
-                                Higher = tighter cut, less background rim.");
-            ui.add(egui::Slider::new(&mut self.alpha_lo, 0.50..=0.75).fixed_decimals(2));
-            ui.end_row();
-            ui.label("Bg chroma reject:")
-                .on_hover_text("Drop colourless rim pixels (grey/white/black, incl. the\n\
-                                shadowed background next to the leaf). Higher = more\n\
-                                aggressive; 0 = off.");
-            ui.add(egui::Slider::new(&mut self.chroma_min, 0..=60));
-            ui.end_row();
-        });
-        ui.label(
-            RichText::new("Image size must match the exported ONNX (640).")
-                .small().color(Color32::GRAY),
-        );
-
-        // Edge preview on the first source image (tune before the full run).
+        // Edge preview on the first source image (tune thresholds in Settings > Leaf Seg).
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let can_preview = self.model_ok() && self.source_folder.is_some()
@@ -253,6 +222,41 @@ impl LeafSegTab {
                 }
             });
         }
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        ui_kit::section_header(ui, "Settings");
+        egui::Grid::new("leafseg_settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Confidence:");
+            ui.add(egui::Slider::new(&mut self.conf, 0.0..=1.0).fixed_decimals(2));
+            ui.end_row();
+            ui.label("Image size:");
+            egui::ComboBox::from_id_salt("leafseg_imgsz")
+                .selected_text(format!("{}", self.imgsz))
+                .show_ui(ui, |ui| {
+                    for sz in [320u32, 640, 960, 1280] {
+                        ui.selectable_value(&mut self.imgsz, sz, format!("{sz}"));
+                    }
+                });
+            ui.end_row();
+            ui.label("Cutout edge:")
+                .on_hover_text("Cutout edge tightness (alpha feather start).\n\
+                                Higher = tighter cut, less background rim.\n\
+                                Lower (down to 0.0) = looser/more inclusive edge — \n\
+                                try this if real leaf margin is getting cut off.");
+            ui.add(egui::Slider::new(&mut self.alpha_lo, 0.0..=0.75).fixed_decimals(2));
+            ui.end_row();
+            ui.label("Bg chroma reject:")
+                .on_hover_text("Drop colourless rim pixels (grey/white/black, incl. the\n\
+                                shadowed background next to the leaf). Higher = more\n\
+                                aggressive; 0 = off.");
+            ui.add(egui::Slider::new(&mut self.chroma_min, 0..=60));
+            ui.end_row();
+        });
+        ui.label(
+            RichText::new("Image size must match the exported ONNX (640).")
+                .small().color(Color32::GRAY),
+        );
     }
 
     fn show_gallery(&mut self, ui: &mut Ui) {

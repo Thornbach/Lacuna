@@ -125,7 +125,9 @@ fn rgb_to_lab(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
 }
 
-fn median(v: &mut [f32]) -> f32 {
+/// Exposed so callers can compute a median over a STITCHED (e.g. full-leaf,
+/// rather than per-tile) set of values — see `detect::decide_global`.
+pub(crate) fn median(v: &mut [f32]) -> f32 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = v.len();
     if n == 0 {

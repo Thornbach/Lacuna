@@ -611,11 +611,28 @@ pub fn erode_lobe(
         let remaining = (n_lobes - lobe_idx).max(1);
         let per_lobe  = (target.saturating_sub(eroded) / remaining).max(1);
         let base_r    = ((per_lobe as f32 / std::f32::consts::PI).sqrt() * 1.3)
-            .clamp(8.0, 80.0) as i32;
+            .clamp(8.0, 80.0);
 
-        for dy in -base_r..=base_r {
-            for dx in -base_r..=base_r {
-                if dx * dx + dy * dy > base_r * base_r { continue; }
+        // Angular-harmonic outline (same technique as erode_spots' erode_blob):
+        // a mathematically perfect circle is the least leaf-like shape possible —
+        // real lobe loss follows the leaf's own venation, not a compass. This
+        // keeps the "one big margin chunk removed" character (still area-matched
+        // to base_r) while roughening the boundary into something organic.
+        let n_harm = rng.gen_range(3usize..=6);
+        let harmonics: Vec<(f32, f32, f32)> = (0..n_harm)
+            .map(|_| (rng.gen_range(2..=5) as f32, rng.gen_range(0.08..=0.25_f32), rng.gen::<f32>() * TAU))
+            .collect();
+        let max_r = (base_r * 1.3) as i32 + 2;
+        for dy in -max_r..=max_r {
+            for dx in -max_r..=max_r {
+                let (fx, fy) = (dx as f32, dy as f32);
+                let dist = (fx * fx + fy * fy).sqrt();
+                let angle = fy.atan2(fx);
+                let modulation: f32 = harmonics.iter()
+                    .map(|(freq, amp, phase)| amp * (freq * angle + phase).cos())
+                    .sum();
+                let eff_r = base_r * (1.0 + modulation).max(0.5);
+                if dist > eff_r { continue; }
                 let nx = cx + dx;
                 let ny = cy + dy;
                 if nx < 0 || nx >= w as i32 || ny < 0 || ny >= h as i32 { continue; }
@@ -643,7 +660,7 @@ pub fn erode_focal_sector(
     fraction: f32,
     rng:      &mut impl Rng,
 ) {
-    let mut leaf_px: Vec<usize> = (0..w * h).filter(|&i| mask[i]).collect();
+    let leaf_px: Vec<usize> = (0..w * h).filter(|&i| mask[i]).collect();
     let n_leaf = leaf_px.len();
     if n_leaf < 20 { return; }
 
@@ -653,15 +670,26 @@ pub fn erode_focal_sector(
     let angle = rng.gen::<f32>() * TAU;
     let (nx, ny) = (angle.cos(), angle.sin());
 
-    leaf_px.sort_by(|&a, &b| {
-        let pa = ((a % w) as f32 - cx) * nx + ((a / w) as f32 - cy) * ny;
-        let pb = ((b % w) as f32 - cx) * nx + ((b / w) as f32 - cy) * ny;
-        pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let mut proj: Vec<f32> = leaf_px.iter()
+        .map(|&i| ((i % w) as f32 - cx) * nx + ((i / w) as f32 - cy) * ny)
+        .collect();
+    // A perfectly straight cutting plane never occurs in real herbivory — jitter
+    // the projection before ranking so the kept/removed boundary comes out wavy
+    // rather than a mathematically exact line, while keeping the same overall
+    // "concentrated single-side loss" character (still one coherent sector, just
+    // with an organic edge instead of a ruler-straight one).
+    let (lo, hi) = proj.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &p| (lo.min(p), hi.max(p)));
+    let noise_amp = (hi - lo) * 0.06;
+    for p in proj.iter_mut() {
+        *p += rng.gen_range(-noise_amp..=noise_amp);
+    }
+
+    let mut order: Vec<usize> = (0..leaf_px.len()).collect();
+    order.sort_by(|&a, &b| proj[b].partial_cmp(&proj[a]).unwrap_or(std::cmp::Ordering::Equal));
 
     let n_remove = ((n_leaf as f32 * fraction) as usize).min(n_leaf);
-    for &idx in leaf_px.iter().take(n_remove) {
-        mask[idx] = false;
+    for &k in order.iter().take(n_remove) {
+        mask[leaf_px[k]] = false;
     }
 }
 

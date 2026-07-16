@@ -7,7 +7,7 @@ use egui_phosphor::regular as icon;
 use crate::settings::{AppDefaults, AppSettings};
 use crate::tabs::recon_train::model::backend_name;
 use crate::tabs::{
-    EroderTab, LeafSegTab, MorphologyTab, PipelineTab, ReconInferTab, ReconSimpleTab, ReconTrainTab,
+    EroderTab, LeafSegTab, MorphologyTab, PipelineTab, ReconInferTab, ReconSimpleTab,
     SorterTab, TilePickerTab, TrainTab,
 };
 use crate::ui_kit;
@@ -28,10 +28,15 @@ enum Tab {
     Sorter,
     // reconstruction
     ReconSimple,
-    ReconTrain,
     ReconInfer,
     // app
     Settings,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsCategory {
+    General, Pipeline, ReconTrain, ReconInfer, LeafSeg,
+    Eroder, Train, TilePicker, Morphology, Sorter,
 }
 
 // ── Root app ──────────────────────────────────────────────────────────────────
@@ -41,7 +46,6 @@ pub struct LacunaApp {
     eroder:        EroderTab,
     sorter:        SorterTab,
     recon_simple:  ReconSimpleTab,
-    recon_train:   ReconTrainTab,
     recon_infer:   ReconInferTab,
     leaf_seg:      LeafSegTab,
     pipeline:      PipelineTab,
@@ -51,6 +55,7 @@ pub struct LacunaApp {
     settings:      AppSettings,
     toasts:        ToastManager,
     default_pick:  Option<(DefaultField, mpsc::Receiver<Option<PathBuf>>)>,
+    settings_category: SettingsCategory,
     // tab-switch fade-in transition
     prev_tab:       Tab,
     tab_changed_at: f64,
@@ -82,7 +87,6 @@ impl LacunaApp {
         let mut eroder        = EroderTab::new();
         let mut sorter        = SorterTab::new();
         let mut recon_simple  = ReconSimpleTab::new();
-        let mut recon_train   = ReconTrainTab::new();
         let mut recon_infer   = ReconInferTab::new();
         let mut leaf_seg      = LeafSegTab::new();
         let mut pipeline      = PipelineTab::new();
@@ -92,7 +96,6 @@ impl LacunaApp {
         eroder.load_settings(&settings);
         sorter.load_settings(&settings);
         recon_simple.load_settings(&settings);
-        recon_train.load_settings(&settings);
         recon_infer.load_settings(&settings);
         leaf_seg.load_settings(&settings);
         pipeline.load_settings(&settings);
@@ -102,10 +105,11 @@ impl LacunaApp {
 
         Self {
             active_tab: Tab::Pipeline, // production flow front and centre
-            eroder, sorter, recon_simple, recon_train, recon_infer,
+            eroder, sorter, recon_simple, recon_infer,
             leaf_seg, pipeline, train, tile_picker, morphology,
             settings, toasts: ToastManager::new(),
             default_pick: None,
+            settings_category: SettingsCategory::General,
             prev_tab: Tab::Pipeline,
             tab_changed_at: 0.0,
         }
@@ -133,7 +137,6 @@ impl LacunaApp {
             Tab::Eroder => "Eroder",
             Tab::Sorter => "Sorter",
             Tab::ReconSimple => "Recon Train",
-            Tab::ReconTrain => "GAN Train",
             Tab::ReconInfer => "Recon Infer",
             Tab::Settings => "Settings",
         }
@@ -143,7 +146,6 @@ impl LacunaApp {
         self.eroder.is_processing()
             || self.sorter.needs_repaint()
             || self.recon_simple.needs_repaint()
-            || self.recon_train.needs_repaint()
             || self.recon_infer.needs_repaint()
             || self.leaf_seg.needs_repaint()
             || self.pipeline.needs_repaint()
@@ -152,88 +154,64 @@ impl LacunaApp {
             || self.morphology.needs_repaint()
     }
 
-    // ── Left navigation rail ────────────────────────────────────────────────────
+    // ── Top menu bar (replaces the old left nav rail) ───────────────────────────
+    //
+    // Grouped by WORKFLOW, not by model type — mirrors the old nav rail's own
+    // 3-section split, just re-cut: File = process/analyze a dataset, Train =
+    // the two training workflows, Tools = the three standalone utilities.
 
-    fn show_nav(&mut self, ctx: &Context) {
-        egui::SidePanel::left("nav_rail")
-            .exact_width(198.0)
-            .resizable(false)
-            .show(ctx, |ui| {
-                // Settings pinned to the bottom of the rail
-                egui::TopBottomPanel::bottom("nav_bottom")
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| {
-                        ui.add_space(4.0);
-                        if nav_item(ui, self.active_tab == Tab::Settings, icon::GEAR, "Settings") {
-                            self.active_tab = Tab::Settings;
-                        }
-                        ui.add_space(4.0);
-                    });
-
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(format!("{}  Lacuna", icon::LEAF))
-                                .size(20.0)
-                                .strong()
-                                .color(ui_kit::ACCENT),
-                        );
-                    });
-                    ui.add_space(6.0);
-                    ui.separator();
-
-                    ui_kit::section_header(ui, "Pipeline");
-                    if nav_item(ui, self.active_tab == Tab::Pipeline, icon::FLOW_ARROW, "Pipeline") {
-                        self.active_tab = Tab::Pipeline;
-                    }
-                    if nav_item(ui, self.active_tab == Tab::LeafSeg, icon::SCISSORS, "Leaf Seg") {
-                        self.active_tab = Tab::LeafSeg;
-                    }
-                    if nav_item(ui, self.active_tab == Tab::Train, icon::BRAIN, "Train Detector") {
-                        self.active_tab = Tab::Train;
-                    }
-                    if nav_item(ui, self.active_tab == Tab::Morphology, icon::SHAPES, "Morphology") {
-                        self.active_tab = Tab::Morphology;
-                    }
-
-                    ui_kit::section_header(ui, "Tools");
-                    if nav_item(ui, self.active_tab == Tab::TilePicker, icon::CROP, "Tile Picker") {
-                        self.active_tab = Tab::TilePicker;
-                    }
-                    if nav_item(ui, self.active_tab == Tab::Eroder, icon::ERASER, "Eroder") {
-                        self.active_tab = Tab::Eroder;
-                    }
-                    if nav_item(ui, self.active_tab == Tab::Sorter, icon::FOLDERS, "Sorter") {
-                        self.active_tab = Tab::Sorter;
-                    }
-
-                    ui_kit::section_header(ui, "Reconstruction");
-                    if nav_item(ui, self.active_tab == Tab::ReconSimple, icon::ARROWS_CLOCKWISE, "Recon Train") {
-                        self.active_tab = Tab::ReconSimple;
-                    }
-                    if nav_item(ui, self.active_tab == Tab::ReconTrain, icon::SPARKLE, "GAN Train") {
-                        self.active_tab = Tab::ReconTrain;
-                    }
-                    if nav_item(ui, self.active_tab == Tab::ReconInfer, icon::MAGIC_WAND, "Recon Infer") {
-                        self.active_tab = Tab::ReconInfer;
-                    }
-                });
-            });
+    fn menu_item(ui: &mut Ui, tab: &mut Tab, target: Tab, label: &str) {
+        if ui.button(label).clicked() {
+            *tab = target;
+            ui.close_menu();
+        }
     }
 
     // ── Slim context bar (active screen + global busy indicator) ────────────────
 
     fn show_top_bar(&mut self, ctx: &Context) {
         egui::TopBottomPanel::top("top_bar").exact_height(36.0).show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
+            egui::menu::bar(ui, |ui| {
                 ui.add_space(4.0);
-                ui.label(RichText::new(self.active_title()).size(16.0).strong());
-                if self.any_busy() {
-                    ui.add_space(10.0);
-                    ui_kit::busy(ui, "working…");
-                }
+                ui.label(
+                    RichText::new(format!("{}  Lacuna", icon::LEAF))
+                        .size(16.0)
+                        .strong()
+                        .color(ui_kit::ACCENT),
+                );
+                ui.separator();
+
+                ui.menu_button("File", |ui| {
+                    Self::menu_item(ui, &mut self.active_tab, Tab::Pipeline, "Pipeline");
+                    Self::menu_item(ui, &mut self.active_tab, Tab::LeafSeg, "Leaf Seg");
+                    Self::menu_item(ui, &mut self.active_tab, Tab::Morphology, "Morphology");
+                    Self::menu_item(ui, &mut self.active_tab, Tab::ReconInfer, "Recon Infer");
+                });
+                ui.menu_button("Train", |ui| {
+                    Self::menu_item(ui, &mut self.active_tab, Tab::ReconSimple, "Recon Train");
+                    Self::menu_item(ui, &mut self.active_tab, Tab::Train, "Train Detector");
+                });
+                ui.menu_button("Tools", |ui| {
+                    Self::menu_item(ui, &mut self.active_tab, Tab::TilePicker, "Tile Picker");
+                    Self::menu_item(ui, &mut self.active_tab, Tab::Eroder, "Eroder");
+                    Self::menu_item(ui, &mut self.active_tab, Tab::Sorter, "Sorter");
+                });
+
+                // right-aligned: current tab title, busy indicator, Settings —
+                // Settings is a single destination, not a dropdown.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.selectable_label(self.active_tab == Tab::Settings, format!("{} Settings", icon::GEAR))
+                        .clicked()
+                    {
+                        self.active_tab = Tab::Settings;
+                    }
+                    ui.separator();
+                    if self.any_busy() {
+                        ui_kit::busy(ui, "working…");
+                        ui.add_space(10.0);
+                    }
+                    ui.label(RichText::new(self.active_title()).size(15.0).strong());
+                });
             });
         });
     }
@@ -241,65 +219,92 @@ impl LacunaApp {
     // ── Settings screen ─────────────────────────────────────────────────────────
 
     fn show_settings(&mut self, ui: &mut Ui, ctx: &Context) {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            use SettingsCategory::*;
+            for (cat, label) in [
+                (General, "General"), (Pipeline, "Pipeline"), (ReconTrain, "Recon Train"),
+                (ReconInfer, "Recon Infer"), (LeafSeg, "Leaf Seg"), (Eroder, "Eroder"),
+                (Train, "Train"), (TilePicker, "Tile Picker"), (Morphology, "Morphology"),
+                (Sorter, "Sorter"),
+            ] {
+                ui.selectable_value(&mut self.settings_category, cat, label);
+            }
+        });
+        ui.separator();
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.set_max_width(560.0);
             ui.add_space(6.0);
 
-            ui_kit::section_header(ui, "Appearance");
-            egui::Grid::new("settings_appearance")
-                .num_columns(2)
-                .spacing([12.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("Theme");
-                    let current = self.settings.theme_name.clone();
-                    egui::ComboBox::from_id_salt("theme_picker")
-                        .selected_text(&current)
-                        .width(200.0)
-                        .show_ui(ui, |ui| {
-                            for name in crate::theme::theme_names() {
-                                if ui.selectable_label(current == name, name).clicked() {
-                                    self.settings.theme_name = name.to_string();
-                                    crate::theme::apply(ctx, name);
-                                    ui_kit::apply_style(ctx);
-                                }
+            match self.settings_category {
+                SettingsCategory::General => {
+                    ui_kit::section_header(ui, "Appearance");
+                    egui::Grid::new("settings_appearance")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Theme");
+                            let current = self.settings.theme_name.clone();
+                            egui::ComboBox::from_id_salt("theme_picker")
+                                .selected_text(&current)
+                                .width(200.0)
+                                .show_ui(ui, |ui| {
+                                    for name in crate::theme::theme_names() {
+                                        if ui.selectable_label(current == name, name).clicked() {
+                                            self.settings.theme_name = name.to_string();
+                                            crate::theme::apply(ctx, name);
+                                            ui_kit::apply_style(ctx);
+                                        }
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("UI scale");
+                            if ui
+                                .add(egui::Slider::new(&mut self.settings.ui_scale, 0.8..=1.6).fixed_decimals(2))
+                                .changed()
+                            {
+                                ctx.set_pixels_per_point(self.settings.ui_scale);
                             }
+                            ui.end_row();
                         });
-                    ui.end_row();
 
-                    ui.label("UI scale");
-                    if ui
-                        .add(egui::Slider::new(&mut self.settings.ui_scale, 0.8..=1.6).fixed_decimals(2))
-                        .changed()
-                    {
-                        ctx.set_pixels_per_point(self.settings.ui_scale);
-                    }
-                    ui.end_row();
-                });
+                    ui_kit::section_header(ui, "Compute");
+                    ui.label(format!("Backend: {}", backend_name()));
 
-            ui_kit::section_header(ui, "Compute");
-            ui.label(format!("Backend: {}", backend_name()));
+                    ui_kit::section_header(ui, "Shared model defaults");
+                    ui_kit::caption(
+                        ui,
+                        "Set these once; the Pipeline & Train tabs inherit them when their own field is empty.",
+                    );
+                    ui.add_space(4.0);
+                    self.default_row(ui, "YOLO seg (.onnx)", DefaultField::Yolo);
+                    self.default_row(ui, "DINOv3 (.onnx)", DefaultField::Dino);
+                    self.default_row(ui, "Few-shot head (.json)", DefaultField::Head);
+                    self.default_row(ui, "Coreset bank (.bin)", DefaultField::Bank);
+                    self.default_row(ui, "Detector meta (.json)", DefaultField::Meta);
+                    self.default_row(ui, "Recon checkpoint (folder)", DefaultField::Recon);
+                    self.default_row(ui, "Healthy tiles (folder)", DefaultField::Healthy);
 
-            ui_kit::section_header(ui, "Shared model defaults");
-            ui_kit::caption(
-                ui,
-                "Set these once; the Pipeline & Train tabs inherit them when their own field is empty.",
-            );
-            ui.add_space(4.0);
-            self.default_row(ui, "YOLO seg (.onnx)", DefaultField::Yolo);
-            self.default_row(ui, "DINOv3 (.onnx)", DefaultField::Dino);
-            self.default_row(ui, "Few-shot head (.json)", DefaultField::Head);
-            self.default_row(ui, "Coreset bank (.bin)", DefaultField::Bank);
-            self.default_row(ui, "Detector meta (.json)", DefaultField::Meta);
-            self.default_row(ui, "Recon checkpoint (folder)", DefaultField::Recon);
-            self.default_row(ui, "Healthy tiles (folder)", DefaultField::Healthy);
-
-            ui_kit::section_header(ui, "About");
-            ui.label("Lacuna");
-            ui_kit::caption(ui, &format!("v{} - egui 0.29 + Burn 0.16", env!("CARGO_PKG_VERSION")));
-            // Third-party model attributions (required by their licenses).
-            ui_kit::caption(ui, "Built with DINOv3 (Meta Platforms, Inc.)");
-            ui_kit::caption(ui, "Leaf segmentation powered by Ultralytics YOLO (AGPL-3.0)");
-            ui_kit::caption(ui, "See THIRD_PARTY_LICENSES.md for full terms.");
+                    ui_kit::section_header(ui, "About");
+                    ui.label("Lacuna");
+                    ui_kit::caption(ui, &format!("v{} - egui 0.29 + Burn 0.16", env!("CARGO_PKG_VERSION")));
+                    // Third-party model attributions (required by their licenses).
+                    ui_kit::caption(ui, "Built with DINOv3 (Meta Platforms, Inc.)");
+                    ui_kit::caption(ui, "Leaf segmentation powered by Ultralytics YOLO (AGPL-3.0)");
+                    ui_kit::caption(ui, "See THIRD_PARTY_LICENSES.md for full terms.");
+                }
+                SettingsCategory::Pipeline    => self.pipeline.show_settings_panel(ui),
+                SettingsCategory::ReconTrain  => self.recon_simple.show_settings_panel(ui),
+                SettingsCategory::ReconInfer  => self.recon_infer.show_settings_panel(ui),
+                SettingsCategory::LeafSeg     => self.leaf_seg.show_settings_panel(ui),
+                SettingsCategory::Eroder      => self.eroder.show_settings_panel(ui),
+                SettingsCategory::Train       => self.train.show_settings_panel(ui),
+                SettingsCategory::TilePicker  => self.tile_picker.show_settings_panel(ui),
+                SettingsCategory::Morphology  => self.morphology.show_settings_panel(ui),
+                SettingsCategory::Sorter      => self.sorter.show_settings_panel(ui),
+            }
         });
     }
 
@@ -343,14 +348,6 @@ impl LacunaApp {
                         let (epoch, total) = self.recon_simple.epoch_progress();
                         ui.label(RichText::new(format!("Recon Train  |  Epoch {}/{}", epoch, total)).small());
                         if self.recon_simple.is_training() {
-                            ui.separator();
-                            ui.label(RichText::new("Training…").small().color(Color32::YELLOW));
-                        }
-                    }
-                    Tab::ReconTrain => {
-                        let (epoch, total) = self.recon_train.epoch_progress();
-                        ui.label(RichText::new(format!("GAN Train  |  Epoch {}/{}", epoch, total)).small());
-                        if self.recon_train.is_training() {
                             ui.separator();
                             ui.label(RichText::new("Training…").small().color(Color32::YELLOW));
                         }
@@ -453,14 +450,6 @@ fn spawn_default_dialog(field: DefaultField) -> mpsc::Receiver<Option<PathBuf>> 
 }
 
 /// A full-width navigation row: leading icon + label, highlighted when active.
-fn nav_item(ui: &mut Ui, active: bool, icon: &str, label: &str) -> bool {
-    ui.add_sized(
-        [ui.available_width(), 30.0],
-        egui::SelectableLabel::new(active, format!("  {icon}   {label}")),
-    )
-    .clicked()
-}
-
 // ── eframe::App impl ──────────────────────────────────────────────────────────
 
 impl eframe::App for LacunaApp {
@@ -479,7 +468,6 @@ impl eframe::App for LacunaApp {
             }
         }
 
-        self.show_nav(ctx);
         self.show_top_bar(ctx);
         self.show_status_bar(ctx);
 
@@ -502,7 +490,6 @@ impl eframe::App for LacunaApp {
                 }
                 Tab::Sorter      => { self.sorter.show(ui, ctx, &mut self.toasts); }
                 Tab::ReconSimple => { self.recon_simple.show(ui, ctx, &mut self.toasts); }
-                Tab::ReconTrain  => { self.recon_train.show(ui, ctx, &mut self.toasts); }
                 Tab::ReconInfer  => { self.recon_infer.show(ui, ctx, &mut self.toasts); }
                 Tab::LeafSeg     => { self.leaf_seg.show(ui, ctx, &mut self.toasts); }
                 Tab::Pipeline    => { self.pipeline.show(ui, ctx, &mut self.toasts); }
@@ -524,7 +511,6 @@ impl eframe::App for LacunaApp {
         self.eroder.save_settings(&mut self.settings);
         self.sorter.save_settings(&mut self.settings);
         self.recon_simple.save_settings(&mut self.settings);
-        self.recon_train.save_settings(&mut self.settings);
         self.recon_infer.save_settings(&mut self.settings);
         self.leaf_seg.save_settings(&mut self.settings);
         self.pipeline.save_settings(&mut self.settings);

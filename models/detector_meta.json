@@ -1,0 +1,16 @@
+{
+  "threshold": 14.743653297424316,
+  "ch_thresholds": {
+    "dino": 4.04910945892334,
+    "residual": 13.827055931091309,
+    "color": 14.743653297424316
+  },
+  "dino_threshold": 1.0306830763816834,
+  "scale_floors": {
+    "dino": 0.03637798851281404,
+    "residual": 2.9652,
+    "color": 1.2282259833812712
+  },
+  "dim": 1536,
+  "project_dim": null
+}

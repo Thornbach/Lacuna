@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::settings::{AppSettings, CategoryDef, SorterSession};
+use crate::ui_kit;
 use crate::widgets::ToastManager;
 
 // ── per-image status ──────────────────────────────────────────────────────────
@@ -934,16 +935,6 @@ impl SorterTab {
                 }
                 ui.separator();
 
-                let bg_label = if self.show_bg_picker {
-                    RichText::new("🎨").strong()
-                } else {
-                    RichText::new("🎨")
-                };
-                if ui.button(bg_label).on_hover_text("Background color").clicked() {
-                    self.show_bg_picker = !self.show_bg_picker;
-                }
-                ui.separator();
-
                 let has_sorted = self.images.iter()
                     .any(|i| i.status != ImageStatus::Unsorted);
                 if ui.add_enabled(
@@ -999,6 +990,19 @@ impl SorterTab {
         // ── statistics strip ───────────────────────────────────────────────
         ui.separator();
         self.show_stats_strip(ui);
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        ui_kit::section_header(ui, "Display");
+        let bg_label = if self.show_bg_picker {
+            RichText::new("🎨 Background color…").strong()
+        } else {
+            RichText::new("🎨 Background color…")
+        };
+        if ui.button(bg_label).clicked() {
+            self.show_bg_picker = !self.show_bg_picker;
+        }
+        ui_kit::caption(ui, "Opens the color-picker window over the Sorter tab.");
     }
 
     fn show_main_image(&mut self, ui: &mut Ui, ctx: &Context, max_w: f32, max_h: f32) {

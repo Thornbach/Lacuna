@@ -171,6 +171,151 @@ pub fn detect(
     Ok(DetectResult { w: out_w, h: out_h, dino_map, z_map: z_dino, mask, regions, dino_ms, knn_ms })
 }
 
+/// Per-tile raw signal ONLY (no z-score, no decision): bank kNN scores against
+/// an ALREADY-EXTRACTED DINO feature grid (shared with the few-shot path — one
+/// DINO forward per tile serves both detectors, not two) + raw LAB a/b +
+/// residual, each upscaled/computed at the tile's own pixel size. Split out of
+/// `detect()` so the worker can stitch every tile's raw signal into full-leaf
+/// canvases BEFORE `decide_global` computes robust-z or reaches a decision —
+/// see `decide_global`'s doc comment for why per-tile statistics and per-tile
+/// decisions both break down at scale.
+pub struct TileSignal {
+    pub dino_map: Vec<f32>, // out_w*out_h, raw kNN mean-dist
+    pub lab_a:    Vec<f32>,
+    pub lab_b:    Vec<f32>,
+    pub residual: Vec<f32>, // zeros if meta doesn't calibrate residual
+    pub valid:    Vec<bool>,
+    pub knn_ms:   u128,
+}
+
+pub fn extract_tile_signal(
+    feat:     &super::dino::DinoFeatures,
+    bank:     &dyn KnnScorer,
+    meta:     &DetectorMeta,
+    params:   &DetectParams,
+    img:      &RgbImage, // for LAB/residual only — DINO features already extracted
+    out_w:    usize,
+    out_h:    usize,
+    valid_in: Option<&[bool]>,
+) -> TileSignal {
+    let n = out_w * out_h;
+    let t1 = std::time::Instant::now();
+    let scores = bank.knn_mean_dist(&feat.feat, feat.grid * feat.grid, params.knn_k);
+    let knn_ms = t1.elapsed().as_millis();
+    let dino_map = upscale(&scores, feat.grid, feat.grid, out_w, out_h);
+
+    let all_true;
+    let valid: &[bool] = match valid_in {
+        Some(v) => v,
+        None => { all_true = vec![true; n]; &all_true }
+    };
+
+    // raw LAB a/b (tile-local median from lab_ab discarded — recomputed globally
+    // in decide_global, which is the whole point of stitching first).
+    let (lab_a, lab_b, _, _) = channels::lab_ab(img, valid);
+    let residual = if meta.has("residual") {
+        channels::residual_map(img, valid, params.residual_ksize)
+    } else {
+        vec![0f32; n]
+    };
+
+    TileSignal { dino_map, lab_a, lab_b, residual, valid: valid.to_vec(), knn_ms }
+}
+
+/// PatchCore decision stage, run ONCE over full-leaf stitched raw signal (every
+/// tile's `TileSignal` upscaled/placed at its origin by the caller) rather than
+/// per-tile. Two problems this fixes at once vs. the old per-tile `detect()`:
+/// (1) seam artifacts — a real anomaly spanning two tiles was judged
+/// independently by each tile's own hysteresis, so whichever half didn't reach
+/// ITS tile's threshold got silently dropped, cutting the anomaly at the tile
+/// boundary; (2) robust-z corruption — `robust_z`'s median/MAD assumes most of
+/// what it's computed over is healthy, which fails when a large anomaly
+/// dominates a SMALL tile (the "healthy" statistics end up describing the
+/// anomaly itself). Computing median/MAD over the whole leaf's valid pixels
+/// instead is far more robust to a big, localized anomaly.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_global(
+    dino_map: &[f32],
+    lab_a:    &[f32],
+    lab_b:    &[f32],
+    residual: &[f32],
+    valid:    &[bool],
+    w:        usize,
+    h:        usize,
+    meta:     &DetectorMeta,
+    params:   &DetectParams,
+) -> DetectResult {
+    let n = w * h;
+
+    let z_dino = robust_z(dino_map, valid, meta.scale_floor("dino"));
+    let dino_mask = channel_mask(&z_dino, meta.ch_threshold("dino"), params.dino_low_ratio, valid, w, h);
+
+    let do_color = params.use_color && meta.has("color");
+    let mut av: Vec<f32> = (0..n).filter(|&i| valid[i]).map(|i| lab_a[i]).collect();
+    let mut bv: Vec<f32> = (0..n).filter(|&i| valid[i]).map(|i| lab_b[i]).collect();
+    let (med_a, med_b) = if av.is_empty() { (0.0, 0.0) } else {
+        (channels::median(&mut av), channels::median(&mut bv))
+    };
+    let z_color = if do_color {
+        let mut color = vec![0f32; n];
+        for i in 0..n {
+            if valid[i] {
+                color[i] = ((lab_a[i] - med_a).powi(2) + (lab_b[i] - med_b).powi(2)).sqrt();
+            }
+        }
+        robust_z(&color, valid, meta.scale_floor("color"))
+    } else {
+        vec![0f32; n]
+    };
+    let color_mask = if do_color {
+        channel_mask(&z_color, meta.ch_threshold("color"), params.color_low_ratio, valid, w, h)
+    } else {
+        vec![false; n]
+    };
+
+    let z_res = if meta.has("residual") {
+        robust_z(residual, valid, meta.scale_floor("residual"))
+    } else {
+        vec![0f32; n]
+    };
+    let res_mask = if meta.has("residual") {
+        channel_mask(&z_res, meta.ch_threshold("residual"), params.residual_low_ratio, valid, w, h)
+    } else {
+        vec![false; n]
+    };
+
+    let mut support = vec![false; n];
+    for i in 0..n {
+        support[i] = dino_mask[i] || color_mask[i];
+    }
+    let res_kept = scale_gate_residual(&res_mask, &support, w, h, params.residual_max_area);
+    let mut mask = vec![false; n];
+    for i in 0..n {
+        mask[i] = support[i] || res_kept[i];
+    }
+    if params.use_dino_floor {
+        for i in 0..n {
+            if valid[i] && dino_map[i] >= meta.dino_threshold {
+                mask[i] = true;
+            }
+        }
+    }
+    for i in 0..n {
+        if !valid[i] {
+            mask[i] = false;
+        }
+    }
+
+    let mask = morph_close(&mask, w, h, params.region_close_px as usize);
+    let mut regions = extract_regions(&mask, w, h, params.min_area);
+    for rg in &mut regions {
+        rg.descriptor = region_descriptor(rg, &z_dino, &z_res, &z_color, lab_a, lab_b, med_a, med_b, w);
+    }
+    DetectResult {
+        w, h, dino_map: dino_map.to_vec(), z_map: z_dino, mask, regions, dino_ms: 0, knn_ms: 0,
+    }
+}
+
 /// 8-D descriptor over a region's pixels: per-channel mean z, mean colour
 /// deviation direction (a,b), and shape (log-area, elongation, extent).
 fn region_descriptor(

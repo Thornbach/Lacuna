@@ -32,6 +32,29 @@ A streaming, per-leaf pipeline:
 Standalone tabs are also provided for segmentation, tile picking, sorting, and each
 reconstruction/morphology stage.
 
+## Requirements (GPU build)
+
+The GPU build needs no cuDNN and no ONNX Runtime — but it DOES need
+**`nvrtc`** (NVIDIA's CUDA runtime-compilation library, used to JIT-compile
+GPU kernels), which does **not** ship with the GPU driver alone. Install the
+[NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) — its
+installer places `nvrtc64_*.dll` somewhere the OS can always find it,
+regardless of how `lacuna.exe` is launched.
+
+**A conda-installed `nvrtc` is usually not enough**: conda puts the DLL in
+that environment's own `Library\bin\`, which is only on `PATH` while that
+specific environment is *activated* in your shell — a double-clicked
+`lacuna.exe` (or one launched any other way) won't see it, even though the
+file genuinely exists on disk. If you don't want to install the full CUDA
+Toolkit, copying the matching `nvrtc64_*.dll` directly into the same folder
+as `lacuna.exe` also works (Windows checks the executable's own folder
+before `PATH`).
+
+Symptom if this is missing: the Pipeline reports a crash like `Unable to
+dynamically load the "nvrtc" shared library` instead of running. If you hit
+anything else GPU-related, the CPU build (`Lacuna-v*-cpu.zip`) always works
+with no NVIDIA software installed at all, just slower.
+
 ## The models
 
 The two neural backbones were **hand-reimplemented in Burn** (not auto-converted) and

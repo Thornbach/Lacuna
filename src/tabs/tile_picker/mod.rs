@@ -217,36 +217,6 @@ impl TilePickerTab {
         }
         ui.label(RichText::new(path_str(&self.output_folder)).small().color(Color32::GRAY));
 
-        ui_kit::section_header(ui, "Tile");
-        egui::Grid::new("tp_params").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Tile size:");
-            ui.add(egui::DragValue::new(&mut self.tile).range(32..=2048).speed(8));
-            ui.end_row();
-        });
-
-        ui_kit::section_header(ui, "Loupe");
-        egui::Grid::new("tp_loupe").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Zoom:");
-            ui.add(egui::Slider::new(&mut self.zoom, 1.5..=8.0).fixed_decimals(1).suffix("x"));
-            ui.end_row();
-            ui.label("Position:");
-            egui::ComboBox::from_id_salt("tp_loupe_pos")
-                .selected_text(if self.loupe_follow { "Follow cursor" } else { "Fixed (drag)" })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.loupe_follow, false, "Fixed (drag)");
-                    ui.selectable_value(&mut self.loupe_follow, true, "Follow cursor");
-                });
-            ui.end_row();
-        });
-        ui_kit::caption(
-            ui,
-            if self.loupe_follow {
-                "Loupe sticks beside the tile square, near the cursor."
-            } else {
-                "Drag the loupe to move it; it stays pinned there."
-            },
-        );
-
         ui_kit::section_header(ui, "View");
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Zoom {:.0}%", self.view_zoom * 100.0)).small());
@@ -305,6 +275,38 @@ impl TilePickerTab {
              Left-click stamps (saved instantly); right-click removes a stamp; Ctrl+Z undoes the \
              last. Mouse wheel zooms, drag pans. ←/→ change image. 'Mark done' remembers finished \
              leaves per folder, so you resume where you left off.",
+        );
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        ui_kit::section_header(ui, "Tile");
+        egui::Grid::new("tp_params").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Tile size:");
+            ui.add(egui::DragValue::new(&mut self.tile).range(32..=2048).speed(8));
+            ui.end_row();
+        });
+
+        ui_kit::section_header(ui, "Loupe");
+        egui::Grid::new("tp_loupe").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Zoom:");
+            ui.add(egui::Slider::new(&mut self.zoom, 1.5..=8.0).fixed_decimals(1).suffix("x"));
+            ui.end_row();
+            ui.label("Position:");
+            egui::ComboBox::from_id_salt("tp_loupe_pos")
+                .selected_text(if self.loupe_follow { "Follow cursor" } else { "Fixed (drag)" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.loupe_follow, false, "Fixed (drag)");
+                    ui.selectable_value(&mut self.loupe_follow, true, "Follow cursor");
+                });
+            ui.end_row();
+        });
+        ui_kit::caption(
+            ui,
+            if self.loupe_follow {
+                "Loupe sticks beside the tile square, near the cursor."
+            } else {
+                "Drag the loupe to move it; it stays pinned there."
+            },
         );
     }
 

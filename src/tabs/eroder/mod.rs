@@ -715,6 +715,100 @@ impl EroderTab {
 
             ui.add_space(6.0);
 
+            // ── Seed ──────────────────────────────────────────────────────
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.seed_enabled, "Fixed seed:");
+                    if self.seed_enabled {
+                        ui.add(egui::DragValue::new(&mut self.seed_value));
+                    } else {
+                        ui.label(RichText::new("random").italics().color(Color32::GRAY));
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+
+            // ── Output ────────────────────────────────────────────────────
+            ui.group(|ui| {
+                ui.label(RichText::new("Output").strong());
+                ui.horizontal(|ui| {
+                    if ui.button("📁 Set output folder").clicked() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.output_rx = Some(rx);
+                        std::thread::spawn(move || {
+                            let r = rfd::FileDialog::new()
+                                .set_title("Output folder").pick_folder();
+                            let _ = tx.send(r);
+                        });
+                    }
+                    if let Some(p) = &self.output_folder {
+                        ui.label(RichText::new(p.to_string_lossy()).small().color(Color32::GRAY));
+                    } else {
+                        ui.label(RichText::new("Not set").color(Color32::from_rgb(200, 100, 100)));
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+
+            // ── Action buttons ────────────────────────────────────────────
+            let is_running = self.processing.as_ref().map_or(false, |p| !p.done);
+            let can_start  = !self.image_paths.is_empty()
+                && self.output_folder.is_some()
+                && !is_running;
+
+            ui.horizontal(|ui| {
+                if ui.add_enabled(can_start,
+                    egui::Button::new(RichText::new("▶  Erode Images").strong())).clicked()
+                {
+                    toasts.info("Starting erosion…");
+                    self.start_processing();
+                }
+
+                if is_running {
+                    if ui.button("⏹ Cancel").clicked() {
+                        if let Some(ps) = &self.processing {
+                            ps.cancelled.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+
+            // ── Progress ──────────────────────────────────────────────────
+            if let Some(ps) = &self.processing {
+                let comp  = ps.completed.load(Ordering::Relaxed);
+                let total = ps.total;
+                let prog  = if total > 0 { comp as f32 / total as f32 } else { 0.0 };
+                ui.add(ProgressBar::new(prog)
+                    .text(format!("{}/{}", comp, total))
+                    .animate(!ps.done));
+            }
+
+            // ── Log ───────────────────────────────────────────────────────
+            if !self.log_entries.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Log").strong());
+                ScrollArea::vertical()
+                    .id_salt("eroder_log")
+                    .max_height(160.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for entry in &self.log_entries {
+                            let color = if entry.starts_with('✓') {
+                                Color32::from_rgb(100, 200, 120)
+                            } else {
+                                Color32::from_rgb(220, 80, 80)
+                            };
+                            ui.label(RichText::new(entry).monospace().color(color).small());
+                        }
+                    });
+            }
+        });
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        ScrollArea::vertical().id_salt("eroder_settings_scroll").show(ui, |ui| {
             // ── Parameters ────────────────────────────────────────────────
             ui.group(|ui| {
                 ui.label(RichText::new("Parameters").strong());
@@ -851,16 +945,6 @@ impl EroderTab {
                 ui.separator();
                 ui.checkbox(&mut self.independent_outputs,
                     "Independent outputs (one subfolder per algorithm)");
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.seed_enabled, "Fixed seed:");
-                    if self.seed_enabled {
-                        ui.add(egui::DragValue::new(&mut self.seed_value));
-                    } else {
-                        ui.label(RichText::new("random").italics().color(Color32::GRAY));
-                    }
-                });
             });
 
             ui.add_space(6.0);
@@ -895,84 +979,6 @@ impl EroderTab {
                     });
                 }
             });
-
-            ui.add_space(6.0);
-
-            // ── Output ────────────────────────────────────────────────────
-            ui.group(|ui| {
-                ui.label(RichText::new("Output").strong());
-                ui.horizontal(|ui| {
-                    if ui.button("📁 Set output folder").clicked() {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        self.output_rx = Some(rx);
-                        std::thread::spawn(move || {
-                            let r = rfd::FileDialog::new()
-                                .set_title("Output folder").pick_folder();
-                            let _ = tx.send(r);
-                        });
-                    }
-                    if let Some(p) = &self.output_folder {
-                        ui.label(RichText::new(p.to_string_lossy()).small().color(Color32::GRAY));
-                    } else {
-                        ui.label(RichText::new("Not set").color(Color32::from_rgb(200, 100, 100)));
-                    }
-                });
-            });
-
-            ui.add_space(6.0);
-
-            // ── Action buttons ────────────────────────────────────────────
-            let is_running = self.processing.as_ref().map_or(false, |p| !p.done);
-            let can_start  = !self.image_paths.is_empty()
-                && self.output_folder.is_some()
-                && !is_running;
-
-            ui.horizontal(|ui| {
-                if ui.add_enabled(can_start,
-                    egui::Button::new(RichText::new("▶  Erode Images").strong())).clicked()
-                {
-                    toasts.info("Starting erosion…");
-                    self.start_processing();
-                }
-
-                if is_running {
-                    if ui.button("⏹ Cancel").clicked() {
-                        if let Some(ps) = &self.processing {
-                            ps.cancelled.store(true, Ordering::Relaxed);
-                        }
-                    }
-                }
-            });
-
-            // ── Progress ──────────────────────────────────────────────────
-            if let Some(ps) = &self.processing {
-                let comp  = ps.completed.load(Ordering::Relaxed);
-                let total = ps.total;
-                let prog  = if total > 0 { comp as f32 / total as f32 } else { 0.0 };
-                ui.add(ProgressBar::new(prog)
-                    .text(format!("{}/{}", comp, total))
-                    .animate(!ps.done));
-            }
-
-            // ── Log ───────────────────────────────────────────────────────
-            if !self.log_entries.is_empty() {
-                ui.add_space(4.0);
-                ui.label(RichText::new("Log").strong());
-                ScrollArea::vertical()
-                    .id_salt("eroder_log")
-                    .max_height(160.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for entry in &self.log_entries {
-                            let color = if entry.starts_with('✓') {
-                                Color32::from_rgb(100, 200, 120)
-                            } else {
-                                Color32::from_rgb(220, 80, 80)
-                            };
-                            ui.label(RichText::new(entry).monospace().color(color).small());
-                        }
-                    });
-            }
         });
     }
 

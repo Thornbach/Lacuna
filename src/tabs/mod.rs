@@ -94,7 +94,6 @@ fn commit_session(
 pub use eroder::EroderTab;
 pub use sorter::SorterTab;
 pub use recon_simple::ReconSimpleTab;
-pub use recon_train::ReconTrainTab;
 pub use recon_infer::ReconInferTab;
 pub use leaf_seg::LeafSegTab;
 pub use pipeline::PipelineTab;

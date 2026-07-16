@@ -63,6 +63,14 @@ pub struct ReconSimpleTab {
     adv_lambda:      f32,
     area_lambda:     f32,
 
+    // LR schedule + resume
+    lr_min_frac:     f64,
+    start_epoch:     usize,
+    resume_best_iou: f32,
+
+    // Hole-consistency loss
+    hole_lambda:     f32,
+
     // Runtime state
     training:       bool,
     cancel_flag:    Arc<AtomicBool>,
@@ -142,6 +150,12 @@ impl ReconSimpleTab {
             d_lr_factor:     0.5,
             adv_lambda:      20.0,
             area_lambda:     3.0,   // ↑ area head = robust scalar lost-area for asymmetric oak
+
+            lr_min_frac:     0.05,
+            start_epoch:     0,
+            resume_best_iou: 0.0,
+
+            hole_lambda:     3.0,
 
             training:       false,
             cancel_flag:    Arc::new(AtomicBool::new(false)),
@@ -223,6 +237,10 @@ impl ReconSimpleTab {
         r.pretrain_epochs     = self.pretrain_epochs;
         r.d_lr_factor         = self.d_lr_factor;
         r.adv_lambda          = self.adv_lambda;
+        r.lr_min_frac         = self.lr_min_frac;
+        r.start_epoch         = self.start_epoch;
+        r.resume_best_iou     = self.resume_best_iou;
+        r.hole_lambda         = self.hole_lambda;
     }
 
     pub fn load_settings(&mut self, s: &AppSettings) {
@@ -260,6 +278,10 @@ impl ReconSimpleTab {
         self.pretrain_epochs  = r.pretrain_epochs;
         self.d_lr_factor      = r.d_lr_factor;
         self.adv_lambda       = r.adv_lambda;
+        self.lr_min_frac      = r.lr_min_frac;
+        self.start_epoch      = r.start_epoch;
+        self.resume_best_iou  = r.resume_best_iou;
+        self.hole_lambda      = r.hole_lambda;
         if let Some(folder) = &self.source_folder.clone() {
             self.source_count = scan_image_count(folder);
         }
@@ -366,10 +388,107 @@ impl ReconSimpleTab {
             ui.label(RichText::new(format!("Resume: {}", f.file_name()
                 .and_then(|n| n.to_str()).unwrap_or("?")))
                 .small().color(Color32::from_rgb(100, 180, 120)));
+            egui::Grid::new("simple_resume_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Resume at epoch:").on_hover_text(
+                        "0-indexed epoch to continue from. Auto-filled from this \
+                         checkpoint's epoch_info.txt when available; otherwise enter \
+                         it manually (last completed epoch shown in the training log).");
+                    ui.add(egui::DragValue::new(&mut self.start_epoch).range(0..=100_000));
+                    ui.end_row();
+
+                    ui.label("Best IoU so far:").on_hover_text(
+                        "Prevents a worse post-resume epoch from overwriting your \
+                         existing checkpoint_best. Auto-filled when available.");
+                    ui.add(egui::DragValue::new(&mut self.resume_best_iou)
+                        .range(0.0..=1.0).speed(0.001).fixed_decimals(4));
+                    ui.end_row();
+                });
         }
 
         ui.add_space(8.0);
 
+        // ── Start / Cancel ────────────────────────────────────────────────────
+        let can_start = self.source_folder.is_some()
+            && self.output_folder.is_some()
+            && self.source_count > 1
+            && !self.training;
+
+        ui.add_enabled_ui(can_start, |ui| {
+            if ui.add_sized(
+                [ui.available_width(), 32.0],
+                egui::Button::new(RichText::new("Start Training").strong()),
+            ).clicked() {
+                self.start_training();
+            }
+        });
+
+        if self.training {
+            if ui.add_sized([ui.available_width(), 26.0], egui::Button::new("Cancel")).clicked() {
+                self.cancel_flag.store(true, Ordering::Relaxed);
+            }
+        }
+
+        if let Some(reason) = (!can_start && !self.training).then(|| {
+            if self.source_folder.is_none()       { "Select a source folder" }
+            else if self.output_folder.is_none()  { "Select an output folder" }
+            else if self.source_count <= 1        { "Need at least 2 images" }
+            else { "" }
+        }) {
+            if !reason.is_empty() {
+                ui.label(RichText::new(reason).small().color(Color32::from_rgb(180, 120, 60)));
+            }
+        }
+
+        ui.add_space(8.0);
+
+        // ── Status ────────────────────────────────────────────────────────────
+        if self.training || self.current_epoch > 0 {
+            ui.label(RichText::new("Status").strong());
+            ui.separator();
+            ui.label(format!("Epoch: {} / {}", self.current_epoch, self.total_epochs));
+
+            if let Some(m) = &self.latest_metrics {
+                egui::Grid::new("simple_metrics_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        metric_row(ui, "Val IoU",     m.iou);
+                        metric_row(ui, "Val F1/Dice", m.dice);
+                        metric_row(ui, "Precision",   m.precision);
+                        metric_row(ui, "Recall",      m.recall);
+                        metric_row(ui, "Pixel Acc",   m.pixel_acc);
+                    });
+            }
+
+            if let Some(ckpt) = &self.latest_checkpoint {
+                ui.label(RichText::new(format!("Last checkpoint:\n{ckpt}"))
+                    .small().color(Color32::GRAY));
+            }
+
+            ui.add_space(8.0);
+        }
+
+        // ── Log ───────────────────────────────────────────────────────────────
+        if !self.log_lines.is_empty() {
+            ui.label(RichText::new("Log").strong());
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("recon_simple_log_scroll")
+                .max_height(150.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for entry in self.log_lines.iter().rev().take(30) {
+                        ui.label(RichText::new(entry).small().monospace());
+                    }
+                });
+        }
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical().id_salt("recon_simple_settings_scroll").show(ui, |ui| {
         // ── Leaf descriptors ──────────────────────────────────────────────────
         ui.label(RichText::new("Leaf Descriptors").strong());
         ui.separator();
@@ -503,6 +622,12 @@ impl ReconSimpleTab {
                     "FN weight in Tversky loss. β<0.5 tolerates under-prediction.");
                 ui.add(egui::Slider::new(&mut self.tversky_beta, 0.1..=0.9).fixed_decimals(2));
                 ui.end_row();
+
+                ui.label("Hole lambda:").on_hover_text(
+                    "Penalises pixels the model's own prediction topologically encloses \
+                     but still predicts as not-leaf — invented interior holes. 0 = disabled.");
+                ui.add(egui::Slider::new(&mut self.hole_lambda, 0.0..=10.0).fixed_decimals(1));
+                ui.end_row();
             });
 
         ui.add_space(8.0);
@@ -536,6 +661,13 @@ impl ReconSimpleTab {
 
                 ui.label("Learning rate:");
                 ui.add(egui::DragValue::new(&mut self.learning_rate).speed(1e-6).fixed_decimals(6));
+                ui.end_row();
+
+                ui.label("LR min fraction:").on_hover_text(
+                    "Cosine LR schedule: decays from the base learning rate down to \
+                     (learning rate × this fraction) by the final epoch. 1.0 = flat \
+                     LR, no decay.");
+                ui.add(egui::Slider::new(&mut self.lr_min_frac, 0.0..=1.0).fixed_decimals(2));
                 ui.end_row();
 
                 ui.label("Grad accum steps:").on_hover_text(
@@ -579,84 +711,7 @@ impl ReconSimpleTab {
                 ui.add(egui::DragValue::new(&mut self.area_lambda).range(0.0..=10.0).speed(0.05).fixed_decimals(2));
                 ui.end_row();
             });
-
-        ui.add_space(10.0);
-
-        // ── Start / Cancel ────────────────────────────────────────────────────
-        let can_start = self.source_folder.is_some()
-            && self.output_folder.is_some()
-            && self.source_count > 1
-            && !self.training;
-
-        ui.add_enabled_ui(can_start, |ui| {
-            if ui.add_sized(
-                [ui.available_width(), 32.0],
-                egui::Button::new(RichText::new("Start Training").strong()),
-            ).clicked() {
-                self.start_training();
-            }
         });
-
-        if self.training {
-            if ui.add_sized([ui.available_width(), 26.0], egui::Button::new("Cancel")).clicked() {
-                self.cancel_flag.store(true, Ordering::Relaxed);
-            }
-        }
-
-        if let Some(reason) = (!can_start && !self.training).then(|| {
-            if self.source_folder.is_none()       { "Select a source folder" }
-            else if self.output_folder.is_none()  { "Select an output folder" }
-            else if self.source_count <= 1        { "Need at least 2 images" }
-            else { "" }
-        }) {
-            if !reason.is_empty() {
-                ui.label(RichText::new(reason).small().color(Color32::from_rgb(180, 120, 60)));
-            }
-        }
-
-        ui.add_space(8.0);
-
-        // ── Status ────────────────────────────────────────────────────────────
-        if self.training || self.current_epoch > 0 {
-            ui.label(RichText::new("Status").strong());
-            ui.separator();
-            ui.label(format!("Epoch: {} / {}", self.current_epoch, self.total_epochs));
-
-            if let Some(m) = &self.latest_metrics {
-                egui::Grid::new("simple_metrics_grid")
-                    .num_columns(2)
-                    .spacing([12.0, 2.0])
-                    .show(ui, |ui| {
-                        metric_row(ui, "Val IoU",     m.iou);
-                        metric_row(ui, "Val F1/Dice", m.dice);
-                        metric_row(ui, "Precision",   m.precision);
-                        metric_row(ui, "Recall",      m.recall);
-                        metric_row(ui, "Pixel Acc",   m.pixel_acc);
-                    });
-            }
-
-            if let Some(ckpt) = &self.latest_checkpoint {
-                ui.label(RichText::new(format!("Last checkpoint:\n{ckpt}"))
-                    .small().color(Color32::GRAY));
-            }
-
-            ui.add_space(8.0);
-        }
-
-        // ── Log ───────────────────────────────────────────────────────────────
-        if !self.log_lines.is_empty() {
-            ui.label(RichText::new("Log").strong());
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("recon_simple_log_scroll")
-                .max_height(150.0)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for entry in self.log_lines.iter().rev().take(30) {
-                        ui.label(RichText::new(entry).small().monospace());
-                    }
-                });
-        }
     }
 
     // ── Right panel ───────────────────────────────────────────────────────────
@@ -827,7 +882,13 @@ impl ReconSimpleTab {
         }
         if let Some(rx) = self.resume_rx.take() {
             match rx.try_recv() {
-                Ok(Some(path)) => { self.resume_folder = Some(path); }
+                Ok(Some(path)) => {
+                    if let Some((epoch, iou)) = training::read_epoch_info(&path) {
+                        self.start_epoch     = epoch;
+                        self.resume_best_iou = iou;
+                    }
+                    self.resume_folder = Some(path);
+                }
                 Ok(None) => {}
                 Err(mpsc::TryRecvError::Empty) => self.resume_rx = Some(rx),
                 Err(_) => {}
@@ -869,11 +930,15 @@ impl ReconSimpleTab {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flag = cancel.clone();
 
+        let is_resume = self.resume_folder.is_some();
+        let start_epoch     = if is_resume { self.start_epoch }     else { 0 };
+        let resume_best_iou = if is_resume { self.resume_best_iou } else { 0.0 };
+
         let (tx, rx) = mpsc::channel::<SimpleTrainMsg>();
         self.rx           = Some(rx);
         self.training     = true;
         self.total_epochs = self.epochs;
-        self.current_epoch = 0;
+        self.current_epoch = start_epoch;
 
         // Clear plot history
         self.b_step.clear(); self.b_g_recon.clear();
@@ -901,6 +966,9 @@ impl ReconSimpleTab {
             image_size:         self.image_size_px as usize,
             curriculum_epochs:  self.curriculum_epochs,
             resume_from,
+            start_epoch,
+            resume_best_iou,
+            lr_min_frac: self.lr_min_frac,
             damage_params: DamageParams {
                 min_pct:          self.damage_min_pct,
                 max_pct:          self.damage_max_pct,
@@ -933,6 +1001,7 @@ impl ReconSimpleTab {
             // Margin-contour emphasis (no symmetry: Quercus is asymmetric).
             boundary_lambda: 3.0,
             boundary_px:     3,
+            hole_lambda:     self.hole_lambda,
         };
 
         if crate::tabs::recon_train::model::backend_name() == "CPU" {
@@ -972,7 +1041,7 @@ fn scan_image_count(folder: &PathBuf) -> usize {
         .count()
 }
 
-fn is_image(p: &std::path::Path) -> bool {
+pub(crate) fn is_image(p: &std::path::Path) -> bool {
     matches!(
         p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
         Some("png") | Some("tif") | Some("tiff") | Some("jpg") | Some("jpeg")

@@ -25,7 +25,11 @@ bank.bin
 # ── Generated outputs ─────────────────────────────────────────────────────────
 smoke_out/
 outputs/
-dist/               # packaged release zips (scripts/package.ps1)
+# packaged release zips (scripts/package.ps1) — gitignore does NOT support
+# inline trailing comments; a `dist/  # comment` line matches the literal
+# comment text too and silently never ignores anything, so this MUST stay a
+# comment-free line by itself.
+dist/
 # NB: models/ IS tracked, but the big weights in it are excluded by the extension
 # rules above — so small configs (detector_meta.json, fewshot_head.json, …) stay
 # versioned while the multi-hundred-MB *.onnx/*.safetensors/*.mpk do not.

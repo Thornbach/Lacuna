@@ -4,6 +4,7 @@ mod app;
 mod dino_burn;
 mod dino_validate;
 mod recon_bench;
+mod recon_validate;
 mod settings;
 mod yolo_burn;
 mod yolo_validate;
@@ -22,14 +23,6 @@ fn main() -> eframe::Result<()> {
     if let Some(pos) = args.iter().position(|a| a == "--smoke") {
         let folder = args.get(pos + 1).cloned().unwrap_or_default();
         smoke::run(&folder);
-        return Ok(());
-    }
-    // headless oak reconstruction A/B: `--recon-bench <oak-folder> [epochs] [max_images]`
-    if let Some(pos) = args.iter().position(|a| a == "--recon-bench") {
-        let folder     = args.get(pos + 1).cloned().unwrap_or_default();
-        let epochs     = args.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let max_images = args.get(pos + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
-        recon_bench::run(&folder, epochs, max_images);
         return Ok(());
     }
     // headless BURN DINOv3 vs ONNX validation: `--dino-burn-validate [ref.st] [weights.st]`
@@ -68,6 +61,14 @@ fn main() -> eframe::Result<()> {
         let epochs     = args.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
         let max_images = args.get(pos + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
         recon_bench::run_training(&folder, epochs, max_images);
+        return Ok(());
+    }
+    // headless validation-report generator: `--recon-validate [checkpoint_dir] [source_folder] [max_images]`
+    if let Some(pos) = args.iter().position(|a| a == "--recon-validate") {
+        let checkpoint_dir = args.get(pos + 1).cloned().unwrap_or_default();
+        let source_folder  = args.get(pos + 2).cloned().unwrap_or_default();
+        let max_images     = args.get(pos + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        recon_validate::run(&checkpoint_dir, &source_folder, max_images);
         return Ok(());
     }
 

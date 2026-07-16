@@ -219,99 +219,6 @@ impl ReconInferTab {
             ui.label(RichText::new(p.display().to_string()).small().color(Color32::GRAY));
         }
 
-        ui.add_space(8.0);
-
-        // ── Leaf descriptors ──────────────────────────────────────────────────
-        ui.label(RichText::new("Leaf Descriptors").strong());
-        ui.separator();
-        ui.label(RichText::new("Must match what was selected during training.")
-            .small().color(Color32::GRAY));
-        ui.add_space(4.0);
-
-        egui::Grid::new("infer_descriptor_grid")
-            .num_columns(2)
-            .spacing([8.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("Shape:");
-                egui::ComboBox::from_id_salt("infer_leaf_shape")
-                    .selected_text(self.leaf_shape.label())
-                    .show_ui(ui, |ui| {
-                        for &shape in LeafShape::ALL {
-                            ui.selectable_value(&mut self.leaf_shape, shape, shape.label());
-                        }
-                    });
-                ui.end_row();
-
-                ui.label("Margin:");
-                egui::ComboBox::from_id_salt("infer_margin_type")
-                    .selected_text(self.margin_type.label())
-                    .show_ui(ui, |ui| {
-                        for &margin in MarginType::ALL {
-                            ui.selectable_value(&mut self.margin_type, margin, margin.label());
-                        }
-                    });
-                ui.end_row();
-            });
-
-        ui.add_space(8.0);
-
-        // ── Model settings ────────────────────────────────────────────────────
-        ui.label(RichText::new("Model settings").strong());
-        ui.separator();
-
-        egui::Grid::new("infer_settings_grid")
-            .num_columns(2)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("Image size:");
-                egui::ComboBox::from_id_salt("infer_img_sz")
-                    .selected_text(format!("{}×{}", self.image_size_px, self.image_size_px))
-                    .show_ui(ui, |ui| {
-                        for sz in [256u32, 512, 1024] {
-                            ui.selectable_value(&mut self.image_size_px, sz,
-                                format!("{}×{}", sz, sz));
-                        }
-                    });
-                ui.end_row();
-
-                ui.label("Mask threshold:");
-                ui.add(egui::Slider::new(&mut self.threshold, 0.1..=0.9)
-                    .fixed_decimals(2));
-                ui.end_row();
-
-                ui.label("Pre-damage:")
-                    .on_hover_text(
-                        "Apply this % of synthetic margin damage before inference.\n\
-                         Puts naturally-damaged leaves inside the training distribution\n\
-                         so the model reconstructs real damage. 1% is usually enough.\n\
-                         Set 0 to disable."
-                    );
-                ui.add(egui::Slider::new(&mut self.pre_damage_pct, 0.0..=5.0)
-                    .suffix("%").fixed_decimals(1));
-                ui.end_row();
-
-                ui.label("TTA (4× rotations):")
-                    .on_hover_text(
-                        "Test-time augmentation: run inference at 0°/90°/180°/270°\n\
-                         and average the four probability maps before thresholding.\n\
-                         Slightly slower but more robust on non-canonical orientations."
-                    );
-                ui.checkbox(&mut self.tta_enabled, "Enable");
-                ui.end_row();
-
-                ui.label("Debug output:")
-                    .on_hover_text(
-                        "Save extra PNGs per image:\n\
-                         _debug_input.png  — exact input the model saw\n\
-                         _debug_prob.png   — raw probability map (jet, before threshold)\n\
-                         Use to diagnose wrong predictions."
-                    );
-                ui.checkbox(&mut self.debug_output, "Save debug PNGs");
-                ui.end_row();
-            });
-        ui.label(RichText::new("Image size must match the checkpoint's training size.")
-            .small().color(Color32::GRAY));
-
         ui.add_space(10.0);
 
         // ── Start / Cancel ────────────────────────────────────────────────────
@@ -419,6 +326,99 @@ impl ReconInferTab {
                     }
                 });
         }
+    }
+
+    pub fn show_settings_panel(&mut self, ui: &mut Ui) {
+        // ── Leaf descriptors ──────────────────────────────────────────────────
+        ui.label(RichText::new("Leaf Descriptors").strong());
+        ui.separator();
+        ui.label(RichText::new("Must match what was selected during training.")
+            .small().color(Color32::GRAY));
+        ui.add_space(4.0);
+
+        egui::Grid::new("infer_descriptor_grid")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Shape:");
+                egui::ComboBox::from_id_salt("infer_leaf_shape")
+                    .selected_text(self.leaf_shape.label())
+                    .show_ui(ui, |ui| {
+                        for &shape in LeafShape::ALL {
+                            ui.selectable_value(&mut self.leaf_shape, shape, shape.label());
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Margin:");
+                egui::ComboBox::from_id_salt("infer_margin_type")
+                    .selected_text(self.margin_type.label())
+                    .show_ui(ui, |ui| {
+                        for &margin in MarginType::ALL {
+                            ui.selectable_value(&mut self.margin_type, margin, margin.label());
+                        }
+                    });
+                ui.end_row();
+            });
+
+        ui.add_space(8.0);
+
+        // ── Model settings ────────────────────────────────────────────────────
+        ui.label(RichText::new("Model settings").strong());
+        ui.separator();
+
+        egui::Grid::new("infer_settings_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Image size:");
+                egui::ComboBox::from_id_salt("infer_img_sz")
+                    .selected_text(format!("{}×{}", self.image_size_px, self.image_size_px))
+                    .show_ui(ui, |ui| {
+                        for sz in [256u32, 512, 1024] {
+                            ui.selectable_value(&mut self.image_size_px, sz,
+                                format!("{}×{}", sz, sz));
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Mask threshold:");
+                ui.add(egui::Slider::new(&mut self.threshold, 0.1..=0.9)
+                    .fixed_decimals(2));
+                ui.end_row();
+
+                ui.label("Pre-damage:")
+                    .on_hover_text(
+                        "Apply this % of synthetic margin damage before inference.\n\
+                         Puts naturally-damaged leaves inside the training distribution\n\
+                         so the model reconstructs real damage. 1% is usually enough.\n\
+                         Set 0 to disable."
+                    );
+                ui.add(egui::Slider::new(&mut self.pre_damage_pct, 0.0..=5.0)
+                    .suffix("%").fixed_decimals(1));
+                ui.end_row();
+
+                ui.label("TTA (4× rotations):")
+                    .on_hover_text(
+                        "Test-time augmentation: run inference at 0°/90°/180°/270°\n\
+                         and average the four probability maps before thresholding.\n\
+                         Slightly slower but more robust on non-canonical orientations."
+                    );
+                ui.checkbox(&mut self.tta_enabled, "Enable");
+                ui.end_row();
+
+                ui.label("Debug output:")
+                    .on_hover_text(
+                        "Save extra PNGs per image:\n\
+                         _debug_input.png  — exact input the model saw\n\
+                         _debug_prob.png   — raw probability map (jet, before threshold)\n\
+                         Use to diagnose wrong predictions."
+                    );
+                ui.checkbox(&mut self.debug_output, "Save debug PNGs");
+                ui.end_row();
+            });
+        ui.label(RichText::new("Image size must match the checkpoint's training size.")
+            .small().color(Color32::GRAY));
     }
 
     // ── Right panel ───────────────────────────────────────────────────────────

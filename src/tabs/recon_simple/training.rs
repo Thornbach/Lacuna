@@ -65,6 +65,14 @@ pub struct SimpleTrainConfig {
     pub damage_params:      DamageParams,
     pub curriculum_epochs:  usize,
     pub resume_from:        Option<PathBuf>,
+    /// 0-indexed epoch to start the loop at (for resuming mid-run). 0 = fresh start.
+    pub start_epoch:        usize,
+    /// Best val IoU already achieved before this run (for resuming), so a worse
+    /// early epoch post-resume can't clobber an existing checkpoint_best.
+    pub resume_best_iou:    f32,
+    /// Cosine LR schedule floor, as a fraction of `lr`, reached at the final
+    /// epoch. 1.0 = flat LR (no decay).
+    pub lr_min_frac:        f64,
     pub accum_steps:        usize,
     /// Leaf shape class index — passed to UNetSimple FiLM conditioning.
     pub leaf_shape:  u32,
@@ -82,6 +90,10 @@ pub struct SimpleTrainConfig {
     pub boundary_lambda: f32,
     /// Half-width (px) of the margin band for the boundary loss.
     pub boundary_px: usize,
+    /// Weight on the hole-consistency loss: penalises pixels the model predicts
+    /// as not-leaf but which its OWN prediction topologically encloses (i.e. an
+    /// invented interior hole). 0 = disabled.
+    pub hole_lambda: f32,
 }
 
 // ── Internal batch type for 4-channel data ────────────────────────────────────
@@ -173,17 +185,42 @@ fn train_loop(
         };
     }
 
+    // beta_1=0.9 (standard high-momentum Adam), NOT the GAN-stabilization 0.5 —
+    // this trainer has no discriminator/adversarial loss at all (pure supervised
+    // Tversky+BCE/TV/confidence/no-delete/area/boundary), so there's no
+    // oscillating minimax dynamic to damp. 0.5 here was inherited from the GAN
+    // trainer's config and just throws away momentum that would otherwise help
+    // push through plateaus — a likely cause of loss stalling mid-run.
     let mut g_optim = AdamConfig::new()
-        .with_beta_1(0.5)
+        .with_beta_1(0.9)
         .with_beta_2(0.999)
         .init::<TrainBackend, UNetSimple<TrainBackend>>();
 
     std::fs::create_dir_all(&cfg.output_dir).map_err(|e| e.to_string())?;
 
-    let mut best_iou  = 0.0f32;
+    // Resuming: seed best_iou from the prior run so an early post-resume epoch
+    // (Adam's momentum/variance restart from zero on resume — only the weights
+    // are checkpointed, not optimizer state) can't clobber a better existing
+    // checkpoint_best just because the fresh default of 0.0 looks like an
+    // improvement over anything.
+    let mut best_iou  = cfg.resume_best_iou;
     let mut step      = 0u64;
     let mut rng       = SmallRng::from_entropy();
     let accum         = cfg.accum_steps.max(1);
+
+    if cfg.start_epoch >= cfg.epochs {
+        log(tx, format!(
+            "start_epoch ({}) >= epochs ({}) — nothing to do.",
+            cfg.start_epoch, cfg.epochs,
+        ));
+        return Ok(());
+    }
+    if cfg.start_epoch > 0 {
+        log(tx, format!(
+            "Resuming at epoch {} (best IoU so far: {:.4})",
+            cfg.start_epoch + 1, best_iou,
+        ));
+    }
 
     if cfg.curriculum_epochs > 0 {
         log(tx, format!(
@@ -194,13 +231,15 @@ fn train_loop(
     }
 
     // ── Epoch loop ────────────────────────────────────────────────────────────
-    for epoch in 0..cfg.epochs {
+    for epoch in cfg.start_epoch..cfg.epochs {
         if cancel.load(Ordering::Relaxed) {
             log(tx, "Training cancelled.".into());
             break;
         }
 
-        log(tx, format!("Epoch {}/{}", epoch + 1, cfg.epochs));
+        let cur_lr = cosine_lr(cfg.lr, epoch, cfg.epochs, cfg.lr_min_frac);
+
+        log(tx, format!("Epoch {}/{}  LR={:.2e}", epoch + 1, cfg.epochs, cur_lr));
 
         let eff_max = if cfg.curriculum_epochs > 0 && epoch < cfg.curriculum_epochs {
             let t = epoch as f32 / cfg.curriculum_epochs as f32;
@@ -286,6 +325,17 @@ fn train_loop(
                 .mul(fake_probs.clone().mul_scalar(-1.0f32).add_scalar(1.0f32))
                 .sum() / vis_sum;
 
+            // Hole-consistency: penalise pixels the model itself topologically
+            // encloses (per its own predicted silhouette) but predicts as NOT
+            // leaf — an invented interior hole. Plain per-pixel losses barely
+            // react to these (a tiny isolated dot moves aggregate BCE/Tversky/
+            // IoU almost nothing), so nothing otherwise discourages them.
+            let g_hole_t = if cfg.hole_lambda > 0.0 {
+                hole_loss(fake_probs.clone(), cfg.image_size, &device)
+            } else {
+                Tensor::<TrainBackend, 1>::zeros([1], &device)
+            };
+
             // Area loss: MSE between predicted area fraction and GT area fraction
             // gt_t is [B,1,H,W]; flatten spatial dims → [B,1], matching area_pred shape
             let b = gt_t.dims()[0];
@@ -318,7 +368,8 @@ fn train_loop(
                 + g_conf_t.mul_scalar(cfg.conf_lambda)
                 + area_loss_t.mul_scalar(cfg.area_lambda)
                 + g_bound_t.mul_scalar(cfg.boundary_lambda)
-                + no_delete_t.mul_scalar(2.0f32);   // strong: never delete visible tissue
+                + no_delete_t.mul_scalar(2.0f32)   // strong: never delete visible tissue
+                + g_hole_t.mul_scalar(cfg.hole_lambda);
 
             if g_recon.is_nan() || g_recon.is_infinite() {
                 log(tx, format!("WARNING: NaN/Inf at step {step}: g_recon={g_recon}"));
@@ -335,7 +386,7 @@ fn train_loop(
             if accum_count % accum as u64 == 0 {
                 let grads = accum_loss.take().unwrap().backward();
                 let params = GradientsParams::from_grads(grads, &generator);
-                generator = g_optim.step(cfg.lr, generator, params);
+                generator = g_optim.step(cur_lr, generator, params);
             }
 
             let _ = tx.send(SimpleTrainMsg::BatchMetrics {
@@ -356,7 +407,7 @@ fn train_loop(
         if let Some(leftover) = accum_loss.take() {
             let grads = leftover.backward();
             let params = GradientsParams::from_grads(grads, &generator);
-            generator = g_optim.step(cfg.lr, generator, params);
+            generator = g_optim.step(cur_lr, generator, params);
         }
 
         if cancel.load(Ordering::Relaxed) { break; }
@@ -378,6 +429,7 @@ fn train_loop(
             let ckpt_dir = cfg.output_dir.join(format!("checkpoint_epoch_{:04}", epoch + 1));
             match save_simple_checkpoint(&generator, &ckpt_dir) {
                 Ok(()) => {
+                    write_epoch_info(&ckpt_dir, epoch + 1, metrics.iou);
                     let _ = tx.send(SimpleTrainMsg::Checkpoint {
                         path: ckpt_dir.to_string_lossy().into_owned(),
                     });
@@ -388,6 +440,7 @@ fn train_loop(
                 best_iou = metrics.iou;
                 let best_dir = cfg.output_dir.join("checkpoint_best");
                 let _ = save_simple_checkpoint(&generator, &best_dir);
+                write_epoch_info(&best_dir, epoch + 1, best_iou);
                 log(tx, format!("  New best IoU: {:.4}", best_iou));
             }
         }
@@ -606,4 +659,75 @@ fn evenly_spaced(n: usize, count: usize) -> Vec<usize> {
     if n == 0 { return vec![]; }
     let count = count.min(n);
     (0..count).map(|i| i * n / count).collect()
+}
+
+/// Location weight for the hole-consistency loss: 1.0 at pixels the model
+/// predicts as NOT-leaf (`prob <= 0.5`) but which its OWN thresholded
+/// prediction topologically encloses (the exact "is this a real hole?" test
+/// `pipeline/worker.rs`'s hole detector runs at inference, reused here at
+/// train time). The mask itself is computed CPU-side from a detached copy of
+/// `fake_probs` (non-differentiable — it only selects WHERE to penalise);
+/// gradient flows back to the network through the differentiable `fake_probs`
+/// factor in the returned loss, exactly like the existing `no_delete_t` term.
+fn hole_loss(
+    fake_probs: Tensor<TrainBackend, 4>,
+    size:       usize,
+    device:     &TrainDevice,
+) -> Tensor<TrainBackend, 1> {
+    const HOLE_BIN_THRESHOLD: f32 = 0.5;
+
+    let dims = fake_probs.dims();
+    let b = dims[0];
+    let n = size * size;
+
+    let pred_flat: Vec<f32> = fake_probs.clone().into_data().to_vec().unwrap_or_default();
+    if pred_flat.len() != b * n {
+        return Tensor::<TrainBackend, 1>::zeros([1], device);
+    }
+
+    let mut mask_flat = Vec::with_capacity(b * n);
+    for s in 0..b {
+        let slice = &pred_flat[s * n..(s + 1) * n];
+        let pred_bin: Vec<bool> = slice.iter().map(|&p| p > HOLE_BIN_THRESHOLD).collect();
+        let pred_filled = fill_holes(&pred_bin, size, size);
+        for i in 0..n {
+            mask_flat.push(if pred_filled[i] && !pred_bin[i] { 1.0f32 } else { 0.0f32 });
+        }
+    }
+
+    let mask_t: Tensor<TrainBackend, 4> =
+        Tensor::from_data(TensorData::new(mask_flat, [b, 1, size, size]), device);
+    let denom = mask_t.clone().sum().clamp_min(1.0f32);
+    mask_t.mul(fake_probs.mul_scalar(-1.0f32).add_scalar(1.0f32)).sum() / denom
+}
+
+/// Cosine-annealed LR: `base_lr` at epoch 0, decaying to `base_lr * lr_min_frac`
+/// at the final epoch (`epoch == total_epochs - 1`). `lr_min_frac = 1.0` disables
+/// decay entirely (flat LR, the old behaviour).
+fn cosine_lr(base_lr: f64, epoch: usize, total_epochs: usize, lr_min_frac: f64) -> f64 {
+    if total_epochs <= 1 { return base_lr; }
+    let t     = (epoch as f64 / (total_epochs - 1) as f64).min(1.0);
+    let cos   = 0.5 * (1.0 + (std::f64::consts::PI * t).cos());
+    let floor = lr_min_frac.clamp(0.0, 1.0);
+    base_lr * (floor + (1.0 - floor) * cos)
+}
+
+/// Sidecar written next to every checkpoint (`checkpoint_epoch_NNNN` and
+/// `checkpoint_best`) so a later "Resume checkpoint…" pick can auto-fill the
+/// resume epoch / best-IoU fields instead of the user having to remember them.
+fn write_epoch_info(dir: &Path, epoch: usize, iou: f32) {
+    let _ = std::fs::write(dir.join("epoch_info.txt"), format!("epoch={epoch}\niou={iou:.4}\n"));
+}
+
+/// Reads the sidecar `write_epoch_info` writes. Returns `None` for checkpoints
+/// saved before this feature existed — caller falls back to manual entry.
+pub fn read_epoch_info(dir: &Path) -> Option<(usize, f32)> {
+    let text = std::fs::read_to_string(dir.join("epoch_info.txt")).ok()?;
+    let mut epoch = None;
+    let mut iou   = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("epoch=") { epoch = v.trim().parse().ok(); }
+        if let Some(v) = line.strip_prefix("iou=")   { iou   = v.trim().parse().ok(); }
+    }
+    Some((epoch?, iou?))
 }

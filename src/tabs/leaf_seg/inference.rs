@@ -8,6 +8,7 @@
 //! No NMS is needed — the head is one-to-one; we just filter by confidence.
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{mpsc, Arc},
     sync::atomic::{AtomicBool, Ordering},
@@ -319,7 +320,14 @@ pub fn segment_one(model: &mut YoloModel, path: &Path, cfg: &SegConfig) -> Resul
 
         let mut mask = vec![0u8; (bw * bh) as usize];
         let mut alpha = vec![0u8; (bw * bh) as usize];
-        let mut leaf_px = 0u32;
+        let mut v_grid = vec![0f32; (bw * bh) as usize];
+        // Background-colour CANDIDATE: this pixel looks like background (either
+        // truly outside the YOLO mask, or a boundary pixel matching the estimated
+        // bg colour/chroma). Whether it's actually dropped is decided below, after
+        // we know which candidates are connected to the real background — see the
+        // flood-fill comment.
+        let mut bg_candidate = vec![false; (bw * bh) as usize];
+
         for yy in 0..bh {
             let oy = (by + yy) as f32;
             let gyf = (oy * scale + pady as f32) / gscale - 0.5; // align_corners=false
@@ -328,9 +336,11 @@ pub fn segment_one(model: &mut YoloModel, path: &Path, cfg: &SegConfig) -> Resul
                 let gxf = (ox * scale + padx as f32) / gscale - 0.5;
                 let v = sample_bilinear(&pm, pw, ph, gxf, gyf);
                 let i = (yy * bw + xx) as usize;
+                v_grid[i] = v;
                 if v >= 0.5 {
                     mask[i] = 1;
-                    leaf_px += 1;
+                } else {
+                    bg_candidate[i] = true; // definitely non-leaf per YOLO's own mask
                 }
                 // Alpha feather sits ENTIRELY at/above the 0.5 mask boundary so no
                 // sub-boundary background can bleed into the cutout edge. The old
@@ -343,8 +353,9 @@ pub fn segment_one(model: &mut YoloModel, path: &Path, cfg: &SegConfig) -> Resul
 
                 // Background-colour edge cleanup: a boundary pixel (not deep leaf)
                 // whose colour matches the estimated background is soft-mask bleed —
-                // drop it. Deep interior (v ≥ 0.85) is never colour-rejected, so a
-                // pale leaf region that happens to match the background is safe.
+                // flag it as a CANDIDATE for dropping. Deep interior (v ≥ 0.85) is
+                // never colour-rejected, so a pale leaf region that happens to match
+                // the background is safe regardless.
                 if alpha[i] > 0 && v < BG_INTERIOR_V {
                     let p = img.get_pixel(bx + xx, by + yy);
                     let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
@@ -360,11 +371,27 @@ pub fn segment_one(model: &mut YoloModel, path: &Path, cfg: &SegConfig) -> Resul
                         dr * dr + dg * dg + db * db < BG_COLOR_DIST2
                     };
                     if chroma < cfg.chroma_min || near_bg {
-                        alpha[i] = 0;
-                        if mask[i] == 1 { mask[i] = 0; leaf_px = leaf_px.saturating_sub(1); }
+                        bg_candidate[i] = true;
                     }
                 }
             }
+        }
+
+        // Only actually drop background-colour candidates that are CONNECTED to
+        // the real background at the crop border (4-connected flood fill). A true
+        // boundary-bleed pixel always touches the actual background; an isolated
+        // interior pixel that merely resembles it in colour (e.g. deep shadow
+        // along the midrib on a dark backdrop) does not — and must not be treated
+        // as if it were background. Same topological-enclosure principle already
+        // used for the Pipeline's hole detector (`worker.rs::reconstruct_area`).
+        let reachable = flood_from_border(&bg_candidate, bw as usize, bh as usize);
+        let mut leaf_px = 0u32;
+        for i in 0..(bw * bh) as usize {
+            if v_grid[i] < BG_INTERIOR_V && reachable[i] {
+                alpha[i] = 0;
+                mask[i] = 0;
+            }
+            if mask[i] == 1 { leaf_px += 1; }
         }
         if leaf_px == 0 {
             continue;
@@ -417,6 +444,42 @@ fn letterbox(img: &RgbImage, target: u32) -> (Vec<f32>, f32, u32, u32) {
         }
     }
     (data, scale, padx, pady)
+}
+
+/// 4-connected flood fill seeded from every `passable` cell on the border of a
+/// `w`×`h` grid, returning which `passable` cells are reachable from the
+/// border. Used to tell real background bleed (touches the actual background
+/// at the crop edge) apart from an isolated interior pixel that only
+/// resembles background in colour but is fully surrounded by leaf tissue.
+fn flood_from_border(passable: &[bool], w: usize, h: usize) -> Vec<bool> {
+    let mut reachable = vec![false; w * h];
+    if w == 0 || h == 0 { return reachable; }
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    let idx = |x: usize, y: usize| y * w + x;
+
+    let mut seed = |i: usize, queue: &mut VecDeque<usize>| {
+        if passable[i] && !reachable[i] {
+            reachable[i] = true;
+            queue.push_back(i);
+        }
+    };
+    for x in 0..w {
+        seed(idx(x, 0), &mut queue);
+        seed(idx(x, h - 1), &mut queue);
+    }
+    for y in 0..h {
+        seed(idx(0, y), &mut queue);
+        seed(idx(w - 1, y), &mut queue);
+    }
+
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % w, i / w);
+        if x > 0     { seed(idx(x - 1, y), &mut queue); }
+        if x + 1 < w { seed(idx(x + 1, y), &mut queue); }
+        if y > 0     { seed(idx(x, y - 1), &mut queue); }
+        if y + 1 < h { seed(idx(x, y + 1), &mut queue); }
+    }
+    reachable
 }
 
 fn build_cutout(img: &RgbImage, bx: u32, by: u32, bw: u32, bh: u32, alpha: &[u8]) -> RgbaImage {

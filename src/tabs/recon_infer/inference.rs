@@ -327,13 +327,13 @@ fn rotate_prob_cw(probs: &[f32], size: usize) -> Vec<f32> {
 }
 
 /// Apply k × 90° CW rotations (k = 0..3).
-fn rotate_rgba_cw_k(rgba: &[u8], size: usize, k: u8) -> Vec<u8> {
+pub(crate) fn rotate_rgba_cw_k(rgba: &[u8], size: usize, k: u8) -> Vec<u8> {
     let mut buf = rgba.to_vec();
     for _ in 0..k { buf = rotate_rgba_cw(&buf, size); }
     buf
 }
 
-fn rotate_prob_cw_k(probs: &[f32], size: usize, k: u8) -> Vec<f32> {
+pub(crate) fn rotate_prob_cw_k(probs: &[f32], size: usize, k: u8) -> Vec<f32> {
     let mut buf = probs.to_vec();
     for _ in 0..k { buf = rotate_prob_cw(&buf, size); }
     buf
