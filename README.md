@@ -55,6 +55,26 @@ dynamically load the "nvrtc" shared library` instead of running. If you hit
 anything else GPU-related, the CPU build (`Lacuna-v*-cpu.zip`) always works
 with no NVIDIA software installed at all, just slower.
 
+**If it still fails after installing the Toolkit**, the exact filename
+matters. Lacuna's release build only looks for the specific `nvrtc64_*.dll`
+name matching the CUDA version it was *compiled* against (currently CUDA
+12.x, so it looks for `nvrtc64_120_0.dll` among a couple of others) — not
+every CUDA version's filename. Two ways this bites people:
+- **You installed the latest CUDA Toolkit and it's a newer major version
+  (e.g. CUDA 13.x)**: its `nvrtc64_130_0.dll` won't match anything this
+  build looks for. Find a CUDA **12.x** `nvrtc64_1XX_0.dll` (e.g. from a
+  `nvidia-cuda-nvrtc-cu12` pip/conda package, or an older 12.x Toolkit
+  install), **copy** it, **rename the copy** to `nvrtc64_120_0.dll`, and
+  place it next to `lacuna.exe`. NVIDIA keeps `nvrtc` ABI-stable across the
+  whole 12.x series, so any 12.x copy works renamed to the 12.0 name.
+  Don't use a CUDA 13.x file — wrong major series for this build.
+- **You only have a pip/conda `nvrtc` package** (e.g. `nvrtc64_122_0.dll`
+  from `nvidia-cuda-nvrtc-cu12==12.2.x`): same fix — copy it, rename to
+  `nvrtc64_120_0.dll`, place next to `lacuna.exe`.
+
+No restart is needed either way — placing the DLL next to the executable
+is checked immediately on every launch, unlike a `PATH` change.
+
 ## The models
 
 The two neural backbones were **hand-reimplemented in Burn** (not auto-converted) and
