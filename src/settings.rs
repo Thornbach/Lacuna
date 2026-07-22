@@ -31,6 +31,41 @@ impl LeafShape {
     ];
 }
 
+// ── Pipeline clustering algorithm choice ────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Default, Debug)]
+pub enum ClusterAlgo {
+    #[default] Dbscan,
+    Hierarchical,
+}
+
+impl ClusterAlgo {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dbscan       => "DBSCAN (density radius)",
+            Self::Hierarchical => "Hierarchical (group count or adaptive)",
+        }
+    }
+    pub const ALL: &'static [ClusterAlgo] = &[Self::Dbscan, Self::Hierarchical];
+}
+
+/// How a Hierarchical run's merge tree gets cut into final clusters.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Default, Debug)]
+pub enum CutMode {
+    #[default] FixedK,
+    Adaptive,
+}
+
+impl CutMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FixedK   => "Fixed K (one global cut depth)",
+            Self::Adaptive => "Adaptive (per-branch depth)",
+        }
+    }
+    pub const ALL: &'static [CutMode] = &[Self::FixedK, Self::Adaptive];
+}
+
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Default, Debug)]
 pub enum MarginType {
     #[default] Smooth,
@@ -461,6 +496,20 @@ pub struct PipelineSettings {
     /// it mostly surfaces its own uncalibrated false positives.
     #[serde(default)]
     pub use_patchcore:      bool,
+    /// Let DBSCAN assign family/cluster labels instead of the head's closed-set
+    /// argmax (which has no reject/novelty option — every detected anomaly gets
+    /// forced into one of the head's trained classes regardless of fit). Off by
+    /// default; requires `use_patchcore`'s bank+meta to also be loaded.
+    #[serde(default)]
+    pub unsupervised_families: bool,
+    /// Train a small domain-adapted projection from this run's own curations
+    /// (fresh in-memory each run, no persisted artifact) and cluster on it
+    /// instead of the raw DINO embedding — closes some of the gap between a
+    /// generic pretrained embedding and a head partially trained on this
+    /// exact data, without giving up open-set flexibility. Falls back to raw
+    /// embeddings (logged) if there isn't enough curated data yet.
+    #[serde(default)]
+    pub domain_projection: bool,
     /// Few-shot defect-probability threshold τ (hysteresis SEED).
     #[serde(default = "default_head_tau")]
     pub head_tau:           f32,
@@ -471,9 +520,41 @@ pub struct PipelineSettings {
     /// only). Lower = more, smaller, possibly-overlapping-in-meaning clusters.
     #[serde(default = "default_cluster_eps")]
     pub cluster_eps:        f32,
-    /// DBSCAN min points. Lower = more, smaller, looser clusters.
+    /// DBSCAN min points. Lower = more, smaller, looser clusters. Dual-purpose
+    /// when `cluster_algo` is Hierarchical: minimum final cluster size (smaller
+    /// groups get folded into noise), same slider, different mechanism.
     #[serde(default = "default_cluster_min_pts")]
     pub cluster_min_pts:    usize,
+    /// Which algorithm assigns unsupervised family/cluster labels (only
+    /// relevant when `unsupervised_families` is on). Default DBSCAN preserves
+    /// existing behavior; Hierarchical picks/suggests a cluster COUNT instead
+    /// of a density radius — added after DBSCAN's density-chaining produced
+    /// the same "fragments+noise, or 1-2 giant blobs" failure on real QA data.
+    #[serde(default)]
+    pub cluster_algo:       ClusterAlgo,
+    /// Target cluster count for Hierarchical mode; 0 = auto (suggested via the
+    /// merge-distance gap heuristic, logged with alternatives — see `cluster::
+    /// suggest_k`).
+    #[serde(default)]
+    pub target_k:           usize,
+    /// How a Hierarchical run's tree gets cut — one flat K (`target_k`) for
+    /// the whole tree, or an adaptive per-branch cut (see `cluster::
+    /// labels_adaptive`) for when different branches genuinely need
+    /// different depths (e.g. one defect-type pair keeps merging no matter
+    /// what K is tried, while everything else resolves fine).
+    #[serde(default)]
+    pub cut_mode:            CutMode,
+    /// Adaptive mode's sensitivity threshold — higher = fewer, more
+    /// conservative splits; lower = more aggressive splitting. Default
+    /// chosen with real margin above typical same-cluster "finishing" noise
+    /// (empirically ran up to ~15-16 on a tight synthetic cluster — a real
+    /// property of the inconsistency statistic, not a bug: completing a
+    /// cluster under complete linkage inherently needs a proportionally
+    /// larger last merge that a small local window can't fully smooth away)
+    /// but there is NO universally correct value — like `cluster_eps`, this
+    /// needs per-dataset tuning; treat this as a starting point.
+    #[serde(default = "default_adaptive_threshold")]
+    pub adaptive_threshold:  f32,
 }
 
 fn default_margin_erode() -> u32 { 6 }
@@ -482,6 +563,7 @@ fn default_head_tau() -> f32 { 0.85 }
 fn default_head_grow() -> f32 { 0.7 }
 fn default_cluster_eps() -> f32 { 1.5 }
 fn default_cluster_min_pts() -> usize { 5 }
+fn default_adaptive_threshold() -> f32 { 8.0 }
 
 impl Default for PipelineSettings {
     fn default() -> Self {
@@ -501,10 +583,16 @@ impl Default for PipelineSettings {
             head_path:          None,
             use_fewshot:        true,
             use_patchcore:      false,
+            unsupervised_families: false,
+            domain_projection: false,
             head_tau:           0.85,
             head_grow:          0.7,
             cluster_eps:        1.5,
             cluster_min_pts:    5,
+            cluster_algo:       ClusterAlgo::Dbscan,
+            target_k:           0,
+            cut_mode:           CutMode::FixedK,
+            adaptive_threshold: 8.0,
         }
     }
 }

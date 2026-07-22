@@ -160,10 +160,9 @@ impl LacunaApp {
     // 3-section split, just re-cut: File = process/analyze a dataset, Train =
     // the two training workflows, Tools = the three standalone utilities.
 
-    fn menu_item(ui: &mut Ui, tab: &mut Tab, target: Tab, label: &str) {
-        if ui.button(label).clicked() {
+    fn tab_button(ui: &mut Ui, tab: &mut Tab, target: Tab, label: &str) {
+        if ui.selectable_label(*tab == target, label).clicked() {
             *tab = target;
-            ui.close_menu();
         }
     }
 
@@ -181,21 +180,17 @@ impl LacunaApp {
                 );
                 ui.separator();
 
-                ui.menu_button("File", |ui| {
-                    Self::menu_item(ui, &mut self.active_tab, Tab::Pipeline, "Pipeline");
-                    Self::menu_item(ui, &mut self.active_tab, Tab::LeafSeg, "Leaf Seg");
-                    Self::menu_item(ui, &mut self.active_tab, Tab::Morphology, "Morphology");
-                    Self::menu_item(ui, &mut self.active_tab, Tab::ReconInfer, "Recon Infer");
-                });
-                ui.menu_button("Train", |ui| {
-                    Self::menu_item(ui, &mut self.active_tab, Tab::ReconSimple, "Recon Train");
-                    Self::menu_item(ui, &mut self.active_tab, Tab::Train, "Train Detector");
-                });
-                ui.menu_button("Tools", |ui| {
-                    Self::menu_item(ui, &mut self.active_tab, Tab::TilePicker, "Tile Picker");
-                    Self::menu_item(ui, &mut self.active_tab, Tab::Eroder, "Eroder");
-                    Self::menu_item(ui, &mut self.active_tab, Tab::Sorter, "Sorter");
-                });
+                Self::tab_button(ui, &mut self.active_tab, Tab::Pipeline, "Pipeline");
+                Self::tab_button(ui, &mut self.active_tab, Tab::LeafSeg, "Leaf Seg");
+                Self::tab_button(ui, &mut self.active_tab, Tab::Morphology, "Morphology");
+                Self::tab_button(ui, &mut self.active_tab, Tab::ReconInfer, "Recon Infer");
+                ui.separator();
+                Self::tab_button(ui, &mut self.active_tab, Tab::ReconSimple, "Recon Train");
+                Self::tab_button(ui, &mut self.active_tab, Tab::Train, "Train Detector");
+                ui.separator();
+                Self::tab_button(ui, &mut self.active_tab, Tab::TilePicker, "Tile Picker");
+                Self::tab_button(ui, &mut self.active_tab, Tab::Eroder, "Eroder");
+                Self::tab_button(ui, &mut self.active_tab, Tab::Sorter, "Sorter");
 
                 // right-aligned: current tab title, busy indicator, Settings —
                 // Settings is a single destination, not a dropdown.
@@ -284,7 +279,7 @@ impl LacunaApp {
                     self.default_row(ui, "Few-shot head (.json)", DefaultField::Head);
                     self.default_row(ui, "Coreset bank (.bin)", DefaultField::Bank);
                     self.default_row(ui, "Detector meta (.json)", DefaultField::Meta);
-                    self.default_row(ui, "Recon checkpoint (folder)", DefaultField::Recon);
+                    self.default_row(ui, "Recon checkpoint (.mpk)", DefaultField::Recon);
                     self.default_row(ui, "Healthy tiles (folder)", DefaultField::Healthy);
 
                     ui_kit::section_header(ui, "About");
@@ -435,7 +430,15 @@ fn spawn_default_dialog(field: DefaultField) -> mpsc::Receiver<Option<PathBuf>> 
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let res = match field {
-            DefaultField::Recon | DefaultField::Healthy => rfd::FileDialog::new().pick_folder(),
+            // Stored as the CONTAINING folder (worker.rs looks for `gen.mpk`
+            // inside it), but a folder-picker dialog can't show files at all —
+            // the user has no way to see/confirm gen.mpk is actually in there.
+            // Let them click the .mpk file directly, then take its parent.
+            DefaultField::Recon => rfd::FileDialog::new()
+                .add_filter("checkpoint", &["mpk"])
+                .pick_file()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+            DefaultField::Healthy => rfd::FileDialog::new().pick_folder(),
             DefaultField::Yolo | DefaultField::Dino => {
                 rfd::FileDialog::new().add_filter("ONNX", &["onnx"]).pick_file()
             }
@@ -455,6 +458,10 @@ fn spawn_default_dialog(field: DefaultField) -> mpsc::Receiver<Option<PathBuf>> 
 impl eframe::App for LacunaApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll_default_pick();
+        // Must run regardless of active tab — `show_settings_panel` (Settings
+        // → Pipeline) spawns file-pick dialogs too, but is a separate entry
+        // point from `PipelineTab::show()`.
+        self.pipeline.poll_pick();
         // share global defaults with the tabs that inherit them
         self.pipeline.set_defaults(&self.settings.defaults);
         self.train.set_defaults(&self.settings.defaults);

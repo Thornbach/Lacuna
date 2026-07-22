@@ -15,22 +15,44 @@ use burn::tensor::{backend::Backend, Tensor, TensorData};
 use leaf_complex_rust_lib::config::Config as MorphConfig;
 use leaf_complex_rust_lib::{analyze_rgba, MorphMetrics};
 use rand::{rngs::SmallRng, SeedableRng};
+use rayon::prelude::*;
 
 use crate::tabs::eroder::algorithm::erode_margin_clusters;
 use crate::tabs::leaf_seg::inference::{self as seg, SegConfig};
 use crate::tabs::recon_infer::inference::{rotate_rgba_cw_k, rotate_prob_cw_k};
 use crate::tabs::recon_simple::model::{load_simple_infer, UNetSimple};
 use crate::tabs::recon_train::model::{create_infer_device, InferBackend};
+use crate::settings::{ClusterAlgo, CutMode};
 
 use super::bank::{CoresetBank, GpuBank};
 use super::cluster;
 use super::detect::{self, DetectParams};
-use super::dino::DinoExtractor;
+use super::dino::{DinoExtractor, DinoFeatures};
 use super::fewshot::{self, FewShotHead};
 use super::meta::DetectorMeta;
-use super::tiling::tile_leaf;
+use super::projection;
+use super::tiling::{crop_to_rgb_meanfill, tile_leaf};
 
-pub(crate) const CROP_WIN: u32 = 64; // context-crop size for the anomaly gallery
+pub(crate) const CROP_WIN: u32 = 64; // context-crop size for the anomaly gallery + curation PNGs
+// Region-adaptive embedding crop (unsupervised_families clustering only, NOT
+// the gallery/curation crop above, which stays fixed at CROP_WIN): a big
+// region only showing its centroid neighborhood in a fixed 64px window loses
+// most of its own extent. EMBED_PAD is the margin added around the region's
+// own bbox; MAX_EMBED_CROP caps the worst case so a huge region doesn't
+// build a huge crop (still only a 2x upsample into the 512px DINO model,
+// vs. today's routine 8x for the fixed 64px crop).
+pub(crate) const EMBED_PAD: u32 = 16;
+pub(crate) const MAX_EMBED_CROP: u32 = 256;
+// PCA target dimensionality for the DINO-embedding unsupervised clustering path
+// (worker.rs's final clustering block). Fixed rather than user-tunable: a 3rd
+// interacting DBSCAN knob (on top of cluster_eps/cluster_min_pts) would compound
+// tuning difficulty more than it'd help. Bumped 16->32 to retain more
+// separating structure — NOTE: this broke the original rationale that 16 kept
+// the standardized feature space's eps scale close to the legacy 8-D
+// descriptor's; there's no such match at 32-D. `suggest_eps_var`'s logged
+// elbow suggestion is the actual mitigant for picking eps now, not a matched
+// constant.
+pub(crate) const DINO_CLUSTER_PCA_DIM: usize = 32;
 // Reconstruction model input size. MUST match the checkpoint's trained
 // image_size_px (settings.json → recon_simple.image_size_px at training time —
 // 256 as of 2026-07). A mismatch doesn't crash (the U-Net is resolution-
@@ -43,12 +65,11 @@ const RECON_SIZE: usize = 256;
 // Reconstruction decision threshold. The net tends to OVER-predict (fills sinuses →
 // false positives), so bias above 0.5 to trim low-confidence over-fill. Tune live in
 // the Recon Infer tab's threshold slider, then set the sweet-spot value here.
-// Used for hole detection and the visual reconstruction preview — deliberately
-// conservative so natural margins/sinuses never get flagged as holes or painted
-// into the preview overlay.
+// Used for the visual reconstruction preview — deliberately conservative so
+// natural margins/sinuses never get painted into the preview overlay.
 const RECON_THRESHOLD: f32 = 0.65;
 // Separate, lower threshold used ONLY for the scalar lost-tissue-%/area stat
-// (recon_area/recon_whole below), NOT the preview or hole detection. RECON_THRESHOLD's
+// (recon_area/recon_whole below), NOT the preview. RECON_THRESHOLD's
 // conservatism is correct for those two, but it introduces a systematic ~4%
 // UNDER-estimate in the area stat specifically (measured via `--recon-validate`
 // on checkpoint `RECONTRAIN/checkpoint_best`, 2026-07: lost-tissue-% bias -4.34%
@@ -57,7 +78,7 @@ const RECON_THRESHOLD: f32 = 0.65;
 // this constant to the new bias-optimal τ from its report.
 const AREA_THRESHOLD: f32 = 0.28;
 // Pre-damage nudge applied to the model's input ONLY (never to the true
-// observed alpha used for hole detection/the area stat). Real herbivory
+// observed alpha used for the area stat). Real herbivory
 // doesn't always visually resemble the synthetic erosion patterns the model
 // trained on, so a small additional synthetic erosion nudges the input back
 // inside the training distribution, making the model reliably trigger its
@@ -65,18 +86,11 @@ const AREA_THRESHOLD: f32 = 0.28;
 // technique, same default 1%, ported here 2026-07-10 alongside the
 // RECON_SIZE fix and TTA below).
 const PRE_DAMAGE_PCT: f32 = 1.0;
-// Reserved family/cluster id for reconstruction-flagged holes: background-colored
-// gaps the cutout treats as opaque leaf but the recon model believes are NOT leaf
-// tissue. These bypass whatever detector clustering is active (few-shot family /
-// PatchCore DBSCAN) — they carry no DINO descriptor, so they always form their own
-// fixed cluster rather than being subject to either path's whims.
-pub(crate) const HOLE_FAMILY: i32 = 9999;
-const HOLE_MIN_AREA: u32 = 6; // min connected-component size (leaf-resolution px)
 // Reserved family/cluster id for PatchCore-only findings: pixels the open-set
 // kNN-vs-healthy-bank detector flags that the few-shot head's closed-set
 // classifier did NOT — i.e. something that doesn't match any known trained
-// defect family. Bypasses DBSCAN like HOLE_FAMILY, for the same reason (no
-// meaningful descriptor to cluster on relative to the few-shot family ids).
+// defect family. Bypasses DBSCAN, since there's no meaningful descriptor to
+// cluster on relative to the few-shot family ids.
 pub(crate) const NOVEL_FAMILY: i32 = 9998;
 // PatchCore's own false-positive rate was never put through the hard-negative-
 // mining campaign that got the few-shot head's FP-region rate down (RESULTS.md:
@@ -101,12 +115,28 @@ pub struct PipeConfig {
     pub recon_ckpt:   Option<PathBuf>, // folder with gen.mpk; None = skip reconstruction
     pub head_path:    Option<PathBuf>, // few-shot head json; runs alongside the bank if both resolve
     pub use_patchcore: bool,          // ALSO run the bank when a head is present (opt-in safety net)
+    // Let DBSCAN over the 8-D descriptor assign family/cluster labels instead of the
+    // head's own closed-set argmax (which has zero reject/novelty option — every
+    // detected anomaly gets forced into one of its trained classes regardless of
+    // fit). Opt-in; requires bank+meta to also be loaded (the descriptor leans on
+    // PatchCore's z-score channels). No effect when no head is configured at all —
+    // that case already clusters unsupervised today.
+    pub unsupervised_families: bool,
+    // Train a small domain-adapted projection (projection.rs) from this run's
+    // OWN curations, fresh in-memory each run, and use it in place of the raw
+    // DINO embedding for clustering. Opt-in; falls back to raw embeddings
+    // (logged) if there isn't enough curated data yet.
+    pub domain_projection: bool,
     pub head_tau:     f32,             // few-shot decision threshold (hysteresis SEED)
     pub head_grow:    f32,             // hysteresis GROW threshold (higher = tighter regions)
     pub seg_alpha_lo:   f32,           // YOLO cutout edge tightness (feather start)
     pub seg_chroma_min: i32,           // YOLO cutout background-chroma rejection
     pub cluster_eps:     f32,          // DBSCAN radius; lower = more/smaller/looser clusters
     pub cluster_min_pts: usize,        // DBSCAN min points; lower = more/smaller/looser clusters
+    pub cluster_algo:    ClusterAlgo,  // Dbscan (default) or Hierarchical
+    pub target_k:        usize,        // FixedK only; 0 = auto via suggest_k
+    pub cut_mode:        CutMode,      // Hierarchical only: FixedK (default) or Adaptive
+    pub adaptive_threshold: f32,       // Adaptive only: inconsistency sensitivity
 }
 
 pub struct PipelineLeaf {
@@ -131,11 +161,32 @@ pub struct AnomalyRegion {
     pub leaf:       usize,      // index into the tab's leaves Vec (emit order)
     pub bbox_leaf:  [u32; 4],   // x, y, w, h in LEAF coords (tile origin + region bbox)
     pub mask:       Vec<bool>,  // bbox-local
-    pub descriptor: [f32; 8],   // 8-D clustering feature (PatchCore path; zeros for few-shot/sentinels)
-    pub family:     i32,        // head-assigned family ≥1 (few-shot); 0 (PatchCore-only); or a
-                                 // reserved sentinel (HOLE_FAMILY / NOVEL_FAMILY)
+    pub descriptor: [f32; 8],   // 8-D clustering feature; zeros for the Novel sentinel, and for
+                                 // few-shot regions UNLESS unsupervised_families scored them (see
+                                 // process_leaf)
+    pub family:     i32,        // head-assigned family ≥1 (few-shot); 0 (PatchCore-only); or the
+                                 // reserved NOVEL_FAMILY sentinel
     pub crop:       Vec<u8>,    // RGBA context-crop thumbnail, crop_size²·4
     pub crop_size:  u32,
+    pub dino_embed: Vec<f32>,   // mask-aware, adaptive-crop, L2-normalized DINO embedding;
+                                 // empty unless unsupervised_families scored it (see process_leaf)
+    pub dino_embed_whole: Vec<f32>, // whole-crop-pooled (NOT mask-aware) L2-normalized companion,
+                                 // same adaptive crop/forward — feeds the domain_projection head,
+                                 // which can only be TRAINED the way historical curation PNGs allow
+                                 // (whole-crop, no persisted mask); empty unless dino_embed is.
+}
+
+/// Everything needed to cheaply re-cut a Hierarchical run at a different K
+/// without rerunning the O(n³) merge search — `cluster::labels_for_k` replays
+/// a prefix of `merges` in O(n). `merges` indices are positions in `real_idx`
+/// (every region's index, in order, at cluster time), NOT `AnomalyRegion`
+/// indices in general — `real_idx[i]` maps a merge-sequence position back to
+/// its actual region. `None` on a `PipeMsg::Clusters` where Dbscan (or the
+/// closed-set argmax path) ran instead.
+pub struct HierarchicalClusterState {
+    pub merges:          Vec<(usize, usize, f32)>,
+    pub real_idx:         Vec<usize>,
+    pub min_cluster_size: usize,
 }
 
 pub enum PipeMsg {
@@ -148,10 +199,11 @@ pub enum PipeMsg {
     /// `names` maps a cluster/family id to a display name (few-shot supplies the
     /// head's family names; empty for the PatchCore path → UI names them "Cluster N").
     Clusters {
-        labels:  Vec<i32>,
-        coords:  Vec<[f32; 2]>,
-        names:   std::collections::HashMap<i32, String>,
-        regions: Vec<AnomalyRegion>,
+        labels:   Vec<i32>,
+        coords:   Vec<[f32; 2]>,
+        names:    std::collections::HashMap<i32, String>,
+        regions:  Vec<AnomalyRegion>,
+        hcluster: Option<HierarchicalClusterState>,
     },
     Finished,
 }
@@ -375,17 +427,31 @@ fn run_pipeline(
     if !all_regions.is_empty() && !cancel.load(Ordering::Relaxed) {
         stage(tx, "Clustering");
         let mut names: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
-        names.insert(HOLE_FAMILY, "Hole (reconstruction)".to_string());
         names.insert(NOVEL_FAMILY, "Novel (PatchCore)".to_string());
-        let is_sentinel = |f: i32| f == HOLE_FAMILY || f == NOVEL_FAMILY;
-        let n_holes = all_regions.iter().filter(|r| r.family == HOLE_FAMILY).count();
+        let is_sentinel = |f: i32| f == NOVEL_FAMILY;
         let n_novel = all_regions.iter().filter(|r| r.family == NOVEL_FAMILY).count();
-        let (labels, coords) = if let Some(head) = &head {
+        // unsupervised_families lets DBSCAN assign the family/cluster label instead
+        // of the head's closed-set argmax, even when a head IS configured — the
+        // head's own defect-vs-healthy signal (used upstream for detection) is
+        // untouched either way, only the FAMILY label's source changes. Requires
+        // bank+meta to have actually loaded (the 8-D descriptor leans on PatchCore's
+        // z-score channels); if they didn't, silently fall back to the head's own
+        // families rather than clustering on all-zero descriptors.
+        let unsupervised_ok = cfg.unsupervised_families && bank.is_some() && meta.is_some();
+        let use_argmax = head.is_some() && !unsupervised_ok;
+        // dino_embed is only ever populated inside process_leaf's `if let Some(head)
+        // = head` branch — a head-absent PatchCore-only run can have unsupervised_ok
+        // true (bank/meta always load when there's no head) while every region's
+        // dino_embed is still empty. Must gate on head.is_some() too, or that run
+        // would try to cluster on all-empty embedding vectors.
+        let use_dino = unsupervised_ok && head.is_some();
+        let (labels, coords, hcluster) = if use_argmax {
+            let head = head.as_ref().expect("use_argmax implies head.is_some()");
             // Few-shot: the head already assigns each region a family. v1 clusters
             // ARE those families (labels = head family), with a per-family jittered
             // scatter so the plot reads as separated clouds. (Open-set discovery on
             // the dense embedding is a follow-up; this is the validated path.)
-            // Hole/Novel regions already carry their sentinel family, so they flow
+            // Novel regions already carry their sentinel family, so they flow
             // through unchanged and land in their own scatter cloud.
             let labels: Vec<i32> = all_regions.iter().map(|r| r.family).collect();
             let coords = family_scatter(&labels);
@@ -395,33 +461,194 @@ fn run_pipeline(
                 }
             }
             log(tx, format!(
-                "{} regions -> {} families (few-shot, {n_holes} holes, {n_novel} novel/PatchCore)",
+                "{} regions -> {} families (few-shot, {n_novel} novel/PatchCore)",
                 all_regions.len(), names.len(),
             ));
-            (labels, coords)
+            (labels, coords, None)
         } else {
-            // PatchCore-only: cluster the 8-D descriptors (StandardScaler + DBSCAN +
-            // PCA-2) over the non-sentinel regions only — holes carry no meaningful
-            // descriptor (zeros), so mixing them into DBSCAN would dump them wherever
-            // the nearest zero-ish real cluster happens to be rather than isolating them.
-            let real_idx: Vec<usize> = (0..all_regions.len()).filter(|&i| !is_sentinel(all_regions[i].family)).collect();
-            let descs: Vec<[f32; 8]> = real_idx.iter().map(|&i| all_regions[i].descriptor).collect();
-            let std = cluster::standardize(&descs);
-            let db_labels = cluster::dbscan(&std, cfg.cluster_eps, cfg.cluster_min_pts);
-            let db_coords = cluster::pca2(&std);
-            // seed from each region's OWN family (preserves HOLE_FAMILY/NOVEL_FAMILY
-            // sentinels; 0 — overwritten below — for every real PatchCore region).
-            let mut labels: Vec<i32> = all_regions.iter().map(|r| r.family).collect();
-            let mut coords = vec![[0.0f32; 2]; all_regions.len()];
-            for (k, &i) in real_idx.iter().enumerate() {
-                labels[i] = db_labels[k];
-                coords[i] = db_coords[k];
+            // Unsupervised: cluster the 8-D descriptors (StandardScaler + DBSCAN +
+            // PCA-2) over every region. Novel (PatchCore) regions ARE folded in here (only excluded when this branch
+            // is reached via head-argmax-off, i.e. never — see below): forcing every
+            // novel-safety-net catch into one fixed "Novel (PatchCore)" bucket is the
+            // same kind of forced-category problem this toggle exists to avoid for
+            // the head's 5 classes. NOVEL_FAMILY regions only ever exist when a head
+            // is configured (see process_leaf), and this branch only runs for a
+            // configured head when unsupervised_families is actually on — so whenever
+            // NOVEL_FAMILY regions are present here, folding them in is always what
+            // was asked for, never a stray leftover from head-absent PatchCore-only
+            // runs (which never produce NOVEL_FAMILY regions at all).
+            if head.is_some() {
+                log(tx, format!(
+                    "unsupervised_families: clustering via {:?} instead of the head's closed-set families",
+                    cfg.cluster_algo,
+                ));
             }
-            let n = labels.iter().copied().filter(|&l| l >= 0 && !is_sentinel(l)).max().map(|m| m + 1).unwrap_or(0);
-            log(tx, format!("{} regions -> {} clusters ({n_holes} holes, {n_novel} novel)", all_regions.len(), n));
-            (labels, coords)
+            let real_idx: Vec<usize> = (0..all_regions.len()).collect();
+            let (db_labels, db_coords, hc) = if use_dino {
+                // Cluster on pooled DINO embeddings instead of the 8-D hand-crafted
+                // descriptor — that descriptor is dominated by "how confidently
+                // anomalous" dims (z_dino/z_res/z_color), which compress every region
+                // (already past the anomaly threshold to exist at all) into one density
+                // mode, swamping the dims that would separate actual defect types.
+                // DINO's embedding is semantically richer (it's what already drives
+                // PatchCore's own healthy-vs-anomalous distance), so it should actually
+                // discriminate different visual appearances. PCA-reduce first — raw
+                // 1536-D Euclidean distances are meaningless (they concentrate).
+                let embeds: Vec<Vec<f32>> = real_idx.iter().map(|&i| all_regions[i].dino_embed.clone()).collect();
+
+                // Optional domain-adapted projection, trained fresh (in-memory, no
+                // persisted artifact) from this run's OWN curations if any exist —
+                // see projection.rs. Falls back to the raw embeddings on any
+                // failure (insufficient curated data, a training panic) rather than
+                // erroring the whole run over an opt-in bonus feature.
+                let (projected, used_projection): (Vec<Vec<f32>>, bool) = if cfg.domain_projection {
+                    let whole_embeds: Vec<Vec<f32>> = real_idx.iter()
+                        .map(|&i| all_regions[i].dino_embed_whole.clone()).collect();
+                    let embed_res = embed_resolution(dino.res());
+                    match projection::try_train_and_apply(&cfg.output_dir, &mut dino, embed_res, &whole_embeds, tx) {
+                        Some(p) => (p, true),
+                        None => (embeds.clone(), false),
+                    }
+                } else {
+                    (embeds, false)
+                };
+
+                // Hybrid descriptor: concatenate the standardized 8-D hand-crafted
+                // descriptor onto the raw DINO embedding, scaled dynamically to match
+                // the embedding block's own total variance — a naive concatenation
+                // would let the 8-D block dominate PCA by 1-2 orders of magnitude
+                // (its total variance is exactly 8 after standardization; an
+                // L2-normalized DINO block's is typically only 0.05-0.3), silently
+                // undoing the whole point of adding it.
+                //
+                // SKIPPED when domain_projection actually trained: that projection is
+                // already a purpose-built, curated-label-driven signal — concatenating
+                // the SAME generic 8-D descriptor at equal weight (chosen for the raw,
+                // unsupervised DINO case) dilutes exactly the direction it was trained
+                // to separate with an unrelated, weaker one. Confirmed via real use:
+                // even the curated training examples themselves failed to cluster
+                // together with the hybrid concatenation active.
+                let mut combined: Vec<Vec<f32>> = if used_projection {
+                    projected
+                } else {
+                    let descs: Vec<[f32; 8]> = real_idx.iter().map(|&i| all_regions[i].descriptor).collect();
+                    let std_desc = cluster::standardize(&descs);
+                    let desc_weight = hybrid_descriptor_weight(&projected);
+                    std_desc.iter().zip(&projected).map(|(d, e)| {
+                        d.iter().map(|&v| v * desc_weight).chain(e.iter().copied()).collect()
+                    }).collect()
+                };
+                // Last-line sanity check before PCA/clustering ever see
+                // this data: a single non-finite component anywhere poisons
+                // every downstream pairwise distance it touches, and
+                // complete-linkage's own defenses can only cope with SO
+                // much of that (a real production incident: a diverged
+                // domain_projection model — now guarded separately at its
+                // own source — produced an all-NaN feature block, and
+                // clustering silently returned zero clusters instead of
+                // failing loudly). Zero out just the offending region's
+                // vector rather than let it corrupt the whole run — a
+                // neutral, finite point that just won't cluster
+                // meaningfully, instead of a landmine for every distance
+                // computed against it.
+                let mut n_bad = 0usize;
+                for row in &mut combined {
+                    if row.iter().any(|v| !v.is_finite()) {
+                        n_bad += 1;
+                        row.iter_mut().for_each(|v| *v = 0.0);
+                    }
+                }
+                if n_bad > 0 {
+                    log(tx, format!(
+                        "unsupervised_families: {n_bad}/{} region embeddings were non-finite, zeroed before clustering",
+                        combined.len(),
+                    ));
+                }
+
+                let t_pca = std::time::Instant::now();
+                let reduced = cluster::pca_k_var(&combined, DINO_CLUSTER_PCA_DIM);
+                let std_var = cluster::standardize_var(&reduced);
+                log(tx, format!(
+                    "unsupervised_families: DINO-embedding clustering, {} regions -> {}-D PCA in {:.0}ms",
+                    real_idx.len(), DINO_CLUSTER_PCA_DIM, t_pca.elapsed().as_secs_f64() * 1000.0,
+                ));
+                match cfg.cluster_algo {
+                    ClusterAlgo::Dbscan => {
+                        // Data-driven eps sanity check: log what the k-distance elbow
+                        // heuristic would suggest alongside whatever eps is actually
+                        // configured, so "everything merged into one blob" (eps too
+                        // loose) or "99% noise" (eps too tight) has a concrete number
+                        // to dial toward instead of blind guessing between extremes.
+                        if let Some(sugg) = cluster::suggest_eps_var(&std_var, cfg.cluster_min_pts) {
+                            log(tx, format!(
+                                "cluster_eps: using {:.2} (min_pts={}) — k-distance elbow suggests ~{:.2}",
+                                cfg.cluster_eps, cfg.cluster_min_pts, sugg,
+                            ));
+                        }
+                        let labels = cluster::dbscan_var(&std_var, cfg.cluster_eps, cfg.cluster_min_pts);
+                        let coords: Vec<[f32; 2]> = cluster::pca_k_var(&std_var, 2)
+                            .iter().map(|p| [p[0], p[1]]).collect();
+                        (labels, coords, None)
+                    }
+                    ClusterAlgo::Hierarchical => {
+                        let merges = cluster::agglomerative_var(&std_var, cancel);
+                        let labels = match cfg.cut_mode {
+                            CutMode::FixedK => resolve_fixed_k(tx, &merges, real_idx.len(), cfg.target_k, cfg.cluster_min_pts).0,
+                            CutMode::Adaptive => resolve_adaptive(tx, &merges, real_idx.len(), cfg.adaptive_threshold, cfg.cluster_min_pts),
+                        };
+                        let coords: Vec<[f32; 2]> = cluster::pca_k_var(&std_var, 2)
+                            .iter().map(|p| [p[0], p[1]]).collect();
+                        let hc = HierarchicalClusterState {
+                            merges, real_idx: real_idx.clone(), min_cluster_size: cfg.cluster_min_pts,
+                        };
+                        (labels, coords, Some(hc))
+                    }
+                }
+            } else {
+                let descs: Vec<[f32; 8]> = real_idx.iter().map(|&i| all_regions[i].descriptor).collect();
+                let std = cluster::standardize(&descs);
+                match cfg.cluster_algo {
+                    ClusterAlgo::Dbscan => {
+                        if let Some(sugg) = cluster::suggest_eps(&std, cfg.cluster_min_pts) {
+                            log(tx, format!(
+                                "cluster_eps: using {:.2} (min_pts={}) — k-distance elbow suggests ~{:.2}",
+                                cfg.cluster_eps, cfg.cluster_min_pts, sugg,
+                            ));
+                        }
+                        let labels = cluster::dbscan(&std, cfg.cluster_eps, cfg.cluster_min_pts);
+                        let coords = cluster::pca2(&std);
+                        (labels, coords, None)
+                    }
+                    ClusterAlgo::Hierarchical => {
+                        let merges = cluster::agglomerative(&std, cancel);
+                        let labels = match cfg.cut_mode {
+                            CutMode::FixedK => resolve_fixed_k(tx, &merges, real_idx.len(), cfg.target_k, cfg.cluster_min_pts).0,
+                            CutMode::Adaptive => resolve_adaptive(tx, &merges, real_idx.len(), cfg.adaptive_threshold, cfg.cluster_min_pts),
+                        };
+                        let coords = cluster::pca2(&std);
+                        let hc = HierarchicalClusterState {
+                            merges, real_idx: real_idx.clone(), min_cluster_size: cfg.cluster_min_pts,
+                        };
+                        (labels, coords, Some(hc))
+                    }
+                }
+            };
+            // `real_idx` is every region index in order now (no more sentinel
+            // exclusion), so `db_labels`/`db_coords` already line up 1:1 with
+            // `all_regions` — no seed-then-overwrite indirection needed.
+            let labels = db_labels;
+            let coords = db_coords;
+            // Count UNIQUE surviving ids, not max+1 — that assumption held for
+            // plain DBSCAN (its ids are always dense from 0) but breaks for
+            // labels_for_k/labels_adaptive: compact_and_fold assigns dense
+            // sequential ids FIRST, then folds undersized groups to noise
+            // afterward, which can leave gaps in the surviving id sequence.
+            let n = labels.iter().copied().filter(|&l| l >= 0)
+                .collect::<std::collections::HashSet<_>>().len();
+            log(tx, format!("{} regions -> {} clusters ({n_novel} novel folded in)", all_regions.len(), n));
+            (labels, coords, hc)
         };
-        let _ = tx.send(PipeMsg::Clusters { labels, coords, names, regions: all_regions });
+        let _ = tx.send(PipeMsg::Clusters { labels, coords, names, regions: all_regions, hcluster });
     }
 
     let _ = tx.send(PipeMsg::Progress { done: total, total });
@@ -464,6 +691,19 @@ fn process_leaf(
     let mut dino_ms = 0f64;     // of which, DINO forward
     let mut dino_tiles = 0usize;// non-skipped tiles that ran DINO
     let mut n_regions = 0usize;
+    let mut dino_embed_ms = 0f64; // unsupervised_families: per-region DINO forward time
+    let mut dino_embed_n = 0usize;
+    // Split out of dino_embed_ms for diagnosing where per-region cost
+    // actually goes (CPU crop-building vs GPU forward-pass vs CPU pooling)
+    // — added specifically because DINO batching (see features_batch)
+    // barely moved per-region wall time despite running on CUDA, which is
+    // surprising enough to want a real breakdown instead of another guess.
+    let mut embed_crop_ms = 0f64;
+    let mut embed_prep_ms = 0f64; // dino.rs's own resize+CHW-repack, was hidden in the "pool" bucket
+    let mut embed_gpu_ms = 0f64;
+    // Region embeddings run at a lower resolution than per-tile detection —
+    // see `embed_resolution`'s doc comment.
+    let embed_res = embed_resolution(dino.res());
 
     // Full-leaf stitched signal canvases, filled in tile by tile and decided
     // ONCE at the end — this (not per-tile decisions) is what actually fixes
@@ -538,6 +778,7 @@ fn process_leaf(
             if fs_mask[i] { anomaly[i] = true; }
         }
         n_regions += fs_regions.len();
+        let fs_start = all_regions.len();
         for rg in &fs_regions {
             let crop = context_crop(&leaf_rgba, lw, lh, rg.centroid[0], rg.centroid[1], CROP_WIN);
             all_regions.push(AnomalyRegion {
@@ -548,6 +789,8 @@ fn process_leaf(
                 family: rg.family,
                 crop,
                 crop_size: CROP_WIN,
+                dino_embed: Vec::new(),
+                dino_embed_whole: Vec::new(),
             });
         }
 
@@ -557,6 +800,64 @@ fn process_leaf(
             // gets double-counted as two overlapping regions — its job here is
             // specifically to catch what the closed-set classifier misses.
             let pc = detect::decide_global(&pc_dino, &pc_a, &pc_b, &pc_res, &leaf_valid, lwu, lhu, meta, params);
+
+            if cfg.unsupervised_families {
+                // Score every few-shot-detected region against PatchCore's own
+                // z-score channels so the final clustering pass has a real
+                // descriptor to run DBSCAN on instead of the head's forced argmax
+                // family. `rg.family` (already set above) becomes irrelevant for
+                // these regions once DBSCAN overwrites the label downstream.
+                for (rg, region) in fs_regions.iter().zip(&mut all_regions[fs_start..]) {
+                    region.descriptor = detect::region_descriptor(
+                        rg.bbox, &rg.mask, rg.area,
+                        &pc.z_map, &pc.z_res, &pc.z_color, &pc_a, &pc_b, pc.med_a, pc.med_b, lwu,
+                    );
+                }
+                // Also compute a DINO embedding of every region's own crop —
+                // the richer feature the final clustering block actually
+                // clusters on (the 8-D descriptor stays a harmless, unused
+                // fallback). Batched (EMBED_BATCH regions per forward pass)
+                // instead of one DINO call per region — see
+                // `dino.rs::features_batch`'s doc comment for why that's the
+                // dominant cost at this scale.
+                let t_embed = std::time::Instant::now();
+                let t_crop = std::time::Instant::now();
+                let (crop_imgs, crop_wins): (Vec<_>, Vec<_>) = fs_regions.iter()
+                    .map(|rg| embed_crop(&leaf_rgba, lw, lh, rg.centroid, rg.bbox))
+                    .unzip();
+                embed_crop_ms += t_crop.elapsed().as_secs_f64() * 1000.0;
+                for start in (0..fs_regions.len()).step_by(EMBED_BATCH) {
+                    let end = (start + EMBED_BATCH).min(fs_regions.len());
+                    match dino.features_batch_at(&crop_imgs[start..end], embed_res) {
+                        Ok(feats) => {
+                            embed_gpu_ms += dino.last_ms as f64;
+                            embed_prep_ms += dino.last_prep_ms as f64;
+                            // Mask-aware pooling is pure per-region CPU work
+                            // (~14% of embed time on real data) — compute the
+                            // whole batch's results in parallel first, THEN
+                            // write them back sequentially, so no two
+                            // rayon tasks ever touch the same `all_regions`
+                            // slot.
+                            let pooled: Vec<(Vec<f32>, Vec<f32>)> = feats.par_iter().enumerate()
+                                .map(|(k, f)| {
+                                    let idx = start + k;
+                                    let rg = &fs_regions[idx];
+                                    pool_region_embed(f, crop_wins[idx], rg.centroid, rg.bbox, &rg.mask, lw, lh, cfg.domain_projection)
+                                })
+                                .collect();
+                            for (k, (mask_aware, whole)) in pooled.into_iter().enumerate() {
+                                let idx = start + k;
+                                all_regions[fs_start + idx].dino_embed = mask_aware;
+                                all_regions[fs_start + idx].dino_embed_whole = whole;
+                            }
+                        }
+                        Err(e) => log(tx, format!("region DINO embed batch failed: {e}")),
+                    }
+                }
+                dino_embed_ms += t_embed.elapsed().as_secs_f64() * 1000.0;
+                dino_embed_n += fs_regions.len();
+            }
+
             let mut novel_mask = vec![false; n_leaf];
             for i in 0..n_leaf {
                 novel_mask[i] = pc.mask[i] && !fs_mask[i];
@@ -564,33 +865,90 @@ fn process_leaf(
             let novel_mask = detect::morph_close(&novel_mask, lwu, lhu, params.region_close_px as usize);
             let novel_regions = detect::extract_regions(&novel_mask, lwu, lhu, params.min_area);
             let dino_thr = meta.ch_threshold("dino") * NOVEL_CONFIDENCE_MULT;
-            for rg in &novel_regions {
-                // Confidence gate: mean z_dino over the region must clear a much
-                // higher bar than PatchCore's normal operating threshold — see
-                // NOVEL_CONFIDENCE_MULT's doc comment for why a flat pass-through
-                // would just be PatchCore's own noise floor.
-                let [bx, by, bw, bh] = rg.bbox;
-                let (mut sum, mut cnt) = (0f32, 0u32);
-                for ly in 0..bh {
-                    for lx in 0..bw {
-                        if rg.mask[(ly * bw + lx) as usize] {
-                            sum += pc.z_map[(by + ly) as usize * lwu + (bx + lx) as usize];
-                            cnt += 1;
+            // Confidence gate FIRST (mean z_dino over the region must clear a
+            // much higher bar than PatchCore's normal operating threshold —
+            // see NOVEL_CONFIDENCE_MULT's doc comment for why a flat
+            // pass-through would just be PatchCore's own noise floor), THEN
+            // batch-embed only the survivors — no point spending a DINO
+            // forward pass on a region that's about to be discarded anyway.
+            let kept: Vec<usize> = (0..novel_regions.len())
+                .filter(|&i| {
+                    let rg = &novel_regions[i];
+                    let [bx, by, bw, bh] = rg.bbox;
+                    let (mut sum, mut cnt) = (0f32, 0u32);
+                    for ly in 0..bh {
+                        for lx in 0..bw {
+                            if rg.mask[(ly * bw + lx) as usize] {
+                                sum += pc.z_map[(by + ly) as usize * lwu + (bx + lx) as usize];
+                                cnt += 1;
+                            }
                         }
                     }
+                    cnt > 0 && (sum / cnt as f32) >= dino_thr
+                })
+                .collect();
+
+            let mut kept_embeds: Vec<(Vec<f32>, Vec<f32>)> = vec![(Vec::new(), Vec::new()); kept.len()];
+            if cfg.unsupervised_families {
+                let t_embed = std::time::Instant::now();
+                let t_crop = std::time::Instant::now();
+                let (crop_imgs, crop_wins): (Vec<_>, Vec<_>) = kept.iter()
+                    .map(|&i| embed_crop(&leaf_rgba, lw, lh, novel_regions[i].centroid, novel_regions[i].bbox))
+                    .unzip();
+                embed_crop_ms += t_crop.elapsed().as_secs_f64() * 1000.0;
+                for start in (0..kept.len()).step_by(EMBED_BATCH) {
+                    let end = (start + EMBED_BATCH).min(kept.len());
+                    match dino.features_batch_at(&crop_imgs[start..end], embed_res) {
+                        Ok(feats) => {
+                            embed_gpu_ms += dino.last_ms as f64;
+                            embed_prep_ms += dino.last_prep_ms as f64;
+                            let pooled: Vec<(Vec<f32>, Vec<f32>)> = feats.par_iter().enumerate()
+                                .map(|(k, f)| {
+                                    let idx = start + k;
+                                    let rg = &novel_regions[kept[idx]];
+                                    pool_region_embed(f, crop_wins[idx], rg.centroid, rg.bbox, &rg.mask, lw, lh, cfg.domain_projection)
+                                })
+                                .collect();
+                            for (k, pair) in pooled.into_iter().enumerate() {
+                                kept_embeds[start + k] = pair;
+                            }
+                        }
+                        Err(e) => log(tx, format!("region DINO embed batch failed: {e}")),
+                    }
                 }
-                if cnt == 0 || (sum / cnt as f32) < dino_thr {
-                    continue;
-                }
+                dino_embed_ms += t_embed.elapsed().as_secs_f64() * 1000.0;
+                dino_embed_n += kept.len();
+            }
+
+            // Score against the SAME PatchCore channels as the few-shot regions
+            // above, so a novel-safety-net catch can be folded into unsupervised
+            // clustering too instead of being force-bucketed as one fixed "Novel
+            // (PatchCore)" catch-all — that catch-all is exactly the same kind of
+            // forced-into-a-fixed-category problem this whole toggle exists to
+            // avoid for the head's 5 classes.
+            for (&i, (mask_aware, whole)) in kept.iter().zip(kept_embeds.into_iter()) {
+                let rg = &novel_regions[i];
+                let [bx, by, bw, bh] = rg.bbox;
                 let crop = context_crop(&leaf_rgba, lw, lh, rg.centroid[0], rg.centroid[1], CROP_WIN);
+                let (descriptor, dino_embed, dino_embed_whole) = if cfg.unsupervised_families {
+                    let descriptor = detect::region_descriptor(
+                        rg.bbox, &rg.mask, rg.area,
+                        &pc.z_map, &pc.z_res, &pc.z_color, &pc_a, &pc_b, pc.med_a, pc.med_b, lwu,
+                    );
+                    (descriptor, mask_aware, whole)
+                } else {
+                    ([0.0; 8], Vec::new(), Vec::new())
+                };
                 all_regions.push(AnomalyRegion {
                     leaf: *leaf_idx,
                     bbox_leaf: rg.bbox,
                     mask: rg.mask.clone(),
-                    descriptor: [0.0; 8],
+                    descriptor,
                     family: NOVEL_FAMILY,
                     crop,
                     crop_size: CROP_WIN,
+                    dino_embed,
+                    dino_embed_whole,
                 });
                 n_regions += 1;
                 for ly in 0..bh {
@@ -620,53 +978,40 @@ fn process_leaf(
                 family: 0,
                 crop,
                 crop_size: CROP_WIN,
+                dino_embed: Vec::new(), // head-absent path never computes region embeddings
+                dino_embed_whole: Vec::new(),
             });
         }
     }
 
     let t_rec = std::time::Instant::now();
-    let (recon_area, recon_whole, recon_mask, recon_hole) = match recon {
+    let (recon_area, recon_whole, recon_mask) = match recon {
         Some(g) => {
             stage(tx, format!("Reconstruct {fname}"));
             reconstruct_area(g, device, &leaf_rgba, lw, lh, RECON_SIZE)
         }
-        None => (0, 0, Vec::new(), Vec::new()),
+        None => (0, 0, Vec::new()),
     };
     let rec_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
-    // Reconstruction-flagged holes: pixels the cutout treats as opaque leaf but the
-    // recon model believes are background — catches large, background-colored gaps
-    // (e.g. holes) the DINO/color tile detector can miss entirely, independent of it.
-    if !recon_hole.is_empty() {
-        let hole_up = upscale_bool_sq(&recon_hole, RECON_SIZE, lwu, lhu);
-        let hole_up = detect::morph_close(&hole_up, lwu, lhu, 1);
-        let hole_regions = detect::extract_regions(&hole_up, lwu, lhu, HOLE_MIN_AREA);
-        for rg in &hole_regions {
-            let [rx, ry, rw, rh] = rg.bbox;
-            let crop = context_crop(&leaf_rgba, lw, lh, rg.centroid[0], rg.centroid[1], CROP_WIN);
-            all_regions.push(AnomalyRegion {
-                leaf: *leaf_idx,
-                bbox_leaf: [rx, ry, rw, rh],
-                mask: rg.mask.clone(),
-                descriptor: [0.0; 8],
-                family: HOLE_FAMILY,
-                crop,
-                crop_size: CROP_WIN,
-            });
-        }
-        n_regions += hole_regions.len();
-        for i in 0..(lwu * lhu) {
-            if hole_up[i] { anomaly[i] = true; }
-        }
-    }
     // morphology (EC/MC complexity) on the leaf cutout — metrics only (overlays
     // dropped, so retention stays ~constant per leaf).
     stage(tx, format!("Morphology {fname}"));
     let t_morph = std::time::Instant::now();
     let morph = analyze_rgba(&leaf_rgba, lw, lh, morph_cfg).ok().map(|r| r.metrics);
     let morph_ms = t_morph.elapsed().as_secs_f64() * 1000.0;
+    let embed_note = if dino_embed_n > 0 {
+        format!(
+            " · {dino_embed_n} region embeds {dino_embed_ms:.0}ms ({:.1}ms/region — crop {:.0}ms, \
+             prep {:.0}ms, gpu {:.0}ms, pool {:.0}ms)",
+            dino_embed_ms / dino_embed_n as f64, embed_crop_ms, embed_prep_ms, embed_gpu_ms,
+            (dino_embed_ms - embed_crop_ms - embed_prep_ms - embed_gpu_ms).max(0.0),
+        )
+    } else {
+        String::new()
+    };
     log(tx, format!(
         "[timing] leaf {}: {dino_tiles} tiles · detect {det_ms:.0}ms (dino {dino_ms:.0}ms = \
-         {:.1}ms/tile, post {:.0}ms) · recon {rec_ms:.0}ms · morph {morph_ms:.0}ms · total {:.0}ms",
+         {:.1}ms/tile, post {:.0}ms) · recon {rec_ms:.0}ms · morph {morph_ms:.0}ms{embed_note} · total {:.0}ms",
         *leaf_idx + 1,
         dino_ms / dino_tiles.max(1) as f64,
         det_ms - dino_ms,
@@ -689,13 +1034,11 @@ fn process_leaf(
     Ok(())
 }
 
-/// Returns `(added, whole, mask, hole)` for a leaf cutout: `added` = reconstructed
+/// Returns `(added, whole, mask)` for a leaf cutout: `added` = reconstructed
 /// lost tissue (predicted leaf where the cutout is missing), `whole` = the whole
 /// intact leaf (predicted ∪ visible) — both in leaf-resolution px — `mask` = the
-/// predicted intact-leaf mask (`sz²`) for the canvas preview, and `hole` = the RAW
-/// (pre-hole-filling) disagreement mask (`sz²`): pixels the cutout treats as opaque
-/// leaf but the model's raw prediction says are NOT leaf (background-colored gaps).
-/// Runs UNetSimple at `sz`×`sz`.
+/// predicted intact-leaf mask (`sz²`) for the canvas preview (`show_recon`'s
+/// cyan tint). Runs UNetSimple at `sz`×`sz`.
 fn reconstruct_area(
     gen:    &UNetSimple<InferBackend>,
     device: &<InferBackend as Backend>::Device,
@@ -703,8 +1046,8 @@ fn reconstruct_area(
     w:      u32,
     h:      u32,
     sz:     usize,
-) -> (usize, usize, Vec<bool>, Vec<bool>) {
-    let Some(img) = image::RgbaImage::from_raw(w, h, rgba.to_vec()) else { return (0, 0, Vec::new(), Vec::new()) };
+) -> (usize, usize, Vec<bool>) {
+    let Some(img) = image::RgbaImage::from_raw(w, h, rgba.to_vec()) else { return (0, 0, Vec::new()) };
     let small = image::imageops::resize(&img, sz as u32, sz as u32, image::imageops::FilterType::Triangle);
     let mut r = small.into_raw();
     for p in r.chunks_mut(4) {
@@ -718,7 +1061,7 @@ fn reconstruct_area(
 
     // Pre-damage nudge: applied to a COPY fed to the model only — `r` (and the
     // `visible` derived from it below) stays the TRUE observed signal, used
-    // for hole detection and the area stat. See PRE_DAMAGE_PCT's doc comment.
+    // for the area stat. See PRE_DAMAGE_PCT's doc comment.
     let model_input_rgba: Vec<u8> = if PRE_DAMAGE_PCT > 0.0 {
         let mut mask: Vec<bool> = r.chunks(4).map(|p| p[3] > 128).collect();
         let fraction = PRE_DAMAGE_PCT / 100.0;
@@ -759,7 +1102,7 @@ fn reconstruct_area(
             Tensor::from_data(TensorData::new(input_data, [1usize, 4, sz, sz]), device);
         let raw: Vec<f32> = gen.forward_probs(input_t, 0, 0).into_data().to_vec().unwrap_or_default();
         if raw.len() != n {
-            return (0, 0, Vec::new(), Vec::new());
+            return (0, 0, Vec::new());
         }
         let unrotated = rotate_prob_cw_k(&raw, sz, (4 - k) % 4);
         for (s, v) in pred.iter_mut().zip(unrotated.iter()) { *s += v; }
@@ -767,44 +1110,8 @@ fn reconstruct_area(
     for p in pred.iter_mut() { *p /= 4.0; }
 
     let visible: Vec<bool> = (0..n).map(|i| r[i * 4 + 3] > 128).collect();
-    // Hole signal — TWO independent cases, both defined by the same test
-    // (topologically enclosed by leaf, i.e. NOT reachable from the image border
-    // through the same kind of pixel), applied to two different source signals:
-    //
-    // (A) OPAQUE but the model's raw prediction doesn't believe it's leaf —
-    //     a background-colored gap that the cutout's alpha channel still marks
-    //     visible. The enclosure check is essential here regardless: the model
-    //     is legitimately less confident along ANY boundary, including ordinary
-    //     serrated/lobed leaf margins, so a flat low-confidence threshold alone
-    //     would flag the whole natural edge as "holes" — a genuine margin,
-    //     however jagged, is always open to the true background at the image
-    //     border, but a real interior hole is not.
-    // (B) TRANSPARENT (alpha=0) but enclosed by the visible silhouette itself —
-    //     a genuinely punched-through gap, independent of what the model
-    //     predicts there. Pure alpha topology, no model dependency: a pixel here
-    //     reads as pitch black against the app's canvas rather than a color, and
-    //     the tile detector already skips transparent pixels via its valid mask,
-    //     so nothing else in the pipeline can ever catch this case.
-    // Both reuse the same border-seeded flood fill `refine_silhouette` uses for
-    // its own hole-filling.
-    let pred_bin: Vec<bool> = (0..n).map(|i| pred[i] >= RECON_THRESHOLD).collect();
-    // Close a small radius on each mask before flood-filling for enclosure: a single-
-    // pixel crack connecting a hole to the image border (plausible near a leaf's own
-    // jagged margin, and increasingly likely the BIGGER the hole is, since it has more
-    // boundary length) would otherwise defeat enclosure for the ENTIRE hole, not just
-    // the crack pixel. Membership below still tests the ORIGINAL (unclosed) masks, so
-    // this only bridges thin cracks — it doesn't grow what counts as "hole."
-    let pred_bin_closed = detect::morph_close(&pred_bin, sz, sz, 2);
-    let visible_closed = detect::morph_close(&visible, sz, sz, 2);
-    let pred_filled = crate::tabs::recon_train::training::fill_holes(&pred_bin_closed, sz, sz);
-    let visible_filled = crate::tabs::recon_train::training::fill_holes(&visible_closed, sz, sz);
-    let hole: Vec<bool> = (0..n).map(|i| {
-        let opaque_bg_colored = visible[i] && !pred_bin[i] && pred_filled[i];
-        let punched_through = !visible[i] && visible_filled[i];
-        opaque_bg_colored || punched_through
-    }).collect();
     // "Shape only" cleanup: keep the silhouette connected to the visible leaf and
-    // fill interior holes → one solid intact shape for the preview and hole test.
+    // fill interior holes → one solid intact shape for the preview.
     let mask = crate::tabs::recon_train::training::refine_silhouette(&pred, &visible, sz, sz, RECON_THRESHOLD);
     // Separate, lower-confidence silhouette used ONLY for the area stat below —
     // see AREA_THRESHOLD's doc comment for why this must differ from `mask`.
@@ -822,7 +1129,6 @@ fn reconstruct_area(
         (added as f64 * scale).round() as usize,
         (whole as f64 * scale).round() as usize,
         mask,
-        hole,
     )
 }
 
@@ -847,17 +1153,70 @@ fn place_tile<T: Copy>(canvas: &mut [T], tile: &[T], origin: [u32; 2], tw: usize
     }
 }
 
-/// Nearest-neighbour upscale of a square `g`×`g` bool grid to `out_w`×`out_h`.
-fn upscale_bool_sq(grid: &[bool], g: usize, out_w: usize, out_h: usize) -> Vec<bool> {
-    let mut out = vec![false; out_w * out_h];
-    for oy in 0..out_h {
-        let gy = (oy * g / out_h.max(1)).min(g - 1);
-        for ox in 0..out_w {
-            let gx = (ox * g / out_w.max(1)).min(g - 1);
-            out[oy * out_w + ox] = grid[gy * g + gx];
-        }
+/// FixedK: resolve `target_k` (0 = auto) to a concrete cluster count and
+/// compute labels for it, logging the auto-suggestion's top candidates
+/// either way so the log is self-explanatory regardless of whether the user
+/// picked K manually. Returns `(labels, resolved_k)`.
+fn resolve_fixed_k(
+    tx: &mpsc::Sender<PipeMsg>,
+    merges: &[(usize, usize, f32)],
+    n: usize,
+    target_k: usize,
+    min_cluster_size: usize,
+) -> (Vec<i32>, usize) {
+    let candidates = cluster::suggest_k(merges);
+    let cand_str = candidates.iter()
+        .map(|&(k, gap)| format!("K={k} (gap {gap:.2})"))
+        .collect::<Vec<_>>().join(", ");
+    let k = if target_k == 0 {
+        let auto = candidates.first().map(|&(k, _)| k).unwrap_or(1);
+        log(tx, format!("target_k=0 (auto): top candidates {cand_str} — using K={auto}"));
+        auto
+    } else {
+        log(tx, format!("target_k={target_k} (manual): top candidates {cand_str}"));
+        target_k
+    };
+    let k = k.clamp(1, n.max(1));
+    let labels = cluster::labels_for_k(merges, n, k, min_cluster_size);
+    (labels, k)
+}
+
+/// Adaptive: cut the tree at a per-branch depth via the inconsistency
+/// statistic (see `cluster::labels_adaptive`'s doc comment) instead of one
+/// flat K applied uniformly — added specifically because a flat cut left 2
+/// of the biggest clusters merging two visually-distinct defect categories
+/// no matter what K was tried, while everything else resolved fine.
+fn resolve_adaptive(
+    tx: &mpsc::Sender<PipeMsg>,
+    merges: &[(usize, usize, f32)],
+    n: usize,
+    threshold: f32,
+    min_cluster_size: usize,
+) -> Vec<i32> {
+    let labels = cluster::labels_adaptive(merges, n, threshold, min_cluster_size);
+    let n_clusters = labels.iter().copied().filter(|&l| l >= 0).collect::<std::collections::HashSet<_>>().len();
+    log(tx, format!("adaptive_threshold={threshold:.2}: {n_clusters} clusters"));
+    labels
+}
+
+/// Scale factor for the standardized 8-D descriptor block so its total
+/// variance matches the (possibly-projected) DINO embedding block's own
+/// total variance, before concatenating the two for PCA — a defensible,
+/// symmetric 50/50 starting point, recomputed fresh every run (like
+/// `suggest_eps`/`suggest_k`, a data-driven number instead of a fixed
+/// constant that would need re-tuning as the embedding's own variance
+/// characteristics shift — e.g. domain_projection changes them a lot).
+fn hybrid_descriptor_weight(embed_block: &[Vec<f32>]) -> f32 {
+    if embed_block.is_empty() {
+        return 1.0;
     }
-    out
+    let dim = embed_block[0].len();
+    let n = embed_block.len() as f32;
+    let mean: Vec<f32> = (0..dim).map(|d| embed_block.iter().map(|p| p[d]).sum::<f32>() / n).collect();
+    let embed_total_var: f32 = (0..dim)
+        .map(|d| embed_block.iter().map(|p| (p[d] - mean[d]).powi(2)).sum::<f32>() / n)
+        .sum();
+    (embed_total_var / 8.0).sqrt().max(1e-3)
 }
 
 /// Scatter coordinates for the few-shot path: there is no PCA embedding (regions
@@ -900,4 +1259,153 @@ pub(crate) fn context_crop(rgba: &[u8], w: u32, h: u32, cx: f32, cy: f32, win: u
         }
     }
     out
+}
+
+// Bound how many region crops go into one batched DINO forward pass
+// (`DinoExtractor::features_batch`) — a leaf can have hundreds of regions,
+// and an unbounded batch risks a very large single GPU allocation. Small
+// enough to keep memory bounded, large enough to meaningfully amortize the
+// forward pass's fixed per-call overhead (the dominant per-region cost —
+// see `dino.rs::features_batch`'s doc comment).
+const EMBED_BATCH: usize = 16;
+
+/// Model input resolution used for region embeddings (both the mask-aware
+/// `dino_embed` and the `dino_embed_whole` companion `domain_projection`
+/// trains on). Currently a no-op (returns `dino_res` unchanged) — TRIED
+/// halving it (self-attention cost scales with patch count squared, so
+/// this looked like a real, non-marginal lever after a crop/gpu/pool
+/// timing breakdown confirmed GPU compute was ~86% of per-region cost),
+/// but real-world timing showed NO measurable change in GPU ms/region —
+/// meaning either the actual bottleneck isn't what the token-count-squared
+/// reasoning assumed, or something about the JIT/CUDA kernel path
+/// (untested hypothesis: a second, differently-shaped kernel needing
+/// separate compilation) cancels out the expected savings. Reverted rather
+/// than keep it as an unproven, unverifiable-from-here change — this repo
+/// has no GPU here to test on, so a claim that isn't backed by the user's
+/// own real timing shouldn't ship as if it were. `features_at`/
+/// `features_batch_at` (the plumbing this called through) stay in place
+/// since they're harmless and reusable if this gets revisited with a real
+/// diagnosis instead of another guess.
+///
+/// If used for anything other than identity, MUST be applied consistently
+/// to every embedding a projection is trained OR applied on —
+/// `projection::try_train_and_apply`'s own training crops (historical
+/// curation PNGs) go through this same call, so there's no train/inference
+/// resolution mismatch (the exact kind of mismatch `dino_embed_whole`'s own
+/// doc comment already had to reason about once, for masking).
+pub(crate) fn embed_resolution(dino_res: u32) -> u32 {
+    dino_res
+}
+
+/// Build the adaptive-size crop used for a region's DINO embedding — NEVER
+/// `region.crop`, which stays fixed at `CROP_WIN` for the gallery thumbnail
+/// AND the literal PNG persisted to curations (must not change size or
+/// those diverge from what the curation flywheel expects). Returns the crop
+/// alongside its own `win` size, which `pool_region_embed` needs to map
+/// patch centers back to leaf coordinates. Split out from the old
+/// `region_dino_embed` so the DINO forward itself can be batched across many
+/// regions (`DinoExtractor::features_batch`) instead of one call per region.
+fn embed_crop(
+    leaf_rgba: &[u8], lw: u32, lh: u32,
+    centroid: [f32; 2], bbox_leaf: [u32; 4],
+) -> (image::RgbImage, u32) {
+    let [_bx, _by, bw, bh] = bbox_leaf;
+    let win = (bw.max(bh) + EMBED_PAD).clamp(CROP_WIN, MAX_EMBED_CROP);
+    let crop = context_crop(leaf_rgba, lw, lh, centroid[0], centroid[1], win);
+    (crop_to_rgb_meanfill(&crop, win, 10), win)
+}
+
+/// Pool one region's already-computed DINO forward result (`f`, from a
+/// batched `features_batch` call) into `(mask_aware, whole_crop)` — the
+/// second half of what `region_dino_embed` used to do in one synchronous
+/// per-region call.
+///
+/// - `mask_aware`: pools only the patches whose center lands on the
+///   region's own mask (falls back to whole-crop pooling if literally zero
+///   patches land on-mask — e.g. a region smaller than one patch's
+///   footprint). This is what `dino_embed` stores and what plain
+///   (non-projected) clustering uses — least diluted by surrounding
+///   healthy tissue.
+/// - `whole_crop`: plain whole-crop pooling, same forward pass, no mask.
+///   Exists specifically to feed `domain_projection` (projection.rs): that
+///   projection can only ever be TRAINED the way historical curation PNGs
+///   allow (flat 64px images, no persisted mask array), so applying it to a
+///   mask-aware vector at inference would be a train/inference mismatch.
+///   Feeding it this whole-crop companion instead removes that mismatch's
+///   masking dimension (a residual crop-SIZE mismatch, adaptive vs. fixed
+///   64px, remains and is accepted as a reasonable approximation for a
+///   coarse domain-adaptation signal, not exact classification). Only
+///   actually computed when `need_whole` (pass `cfg.domain_projection`) —
+///   otherwise returned as an empty `Vec`, since nothing reads it and the
+///   whole-crop pooling pass is real, non-trivial CPU work.
+///
+/// Both outputs are L2-normalized.
+fn pool_region_embed(
+    f: &DinoFeatures, win: u32,
+    centroid: [f32; 2], bbox_leaf: [u32; 4], mask_bbox_local: &[bool],
+    lw: u32, lh: u32,
+    need_whole: bool,
+) -> (Vec<f32>, Vec<f32>) {
+    let [bx, by, bw, bh] = bbox_leaf;
+    let (grid, dim) = (f.grid, f.dim);
+
+    // Mask-aware pooling: map each patch's center pixel through the SAME
+    // clamp formula context_crop used (crop-local -> leaf-global), then to
+    // bbox-local, and keep it only if it lands on the region's own mask.
+    let half = (win / 2) as i32;
+    let (cxr, cyr) = (centroid[0].round() as i32, centroid[1].round() as i32);
+    let mut acc = vec![0f32; dim];
+    let mut n_on = 0usize;
+    for py in 0..grid {
+        for px in 0..grid {
+            let fx = (px as f32 + 0.5) * win as f32 / grid as f32;
+            let fy = (py as f32 + 0.5) * win as f32 / grid as f32;
+            let sx = (cxr - half + fx.round() as i32).clamp(0, lw as i32 - 1);
+            let sy = (cyr - half + fy.round() as i32).clamp(0, lh as i32 - 1);
+            if sx < bx as i32 || sy < by as i32 {
+                continue;
+            }
+            let (lx, ly) = ((sx - bx as i32) as u32, (sy - by as i32) as u32);
+            if lx >= bw || ly >= bh {
+                continue;
+            }
+            if mask_bbox_local[(ly * bw + lx) as usize] {
+                let t = py * grid + px;
+                let row = &f.feat[t * dim..(t + 1) * dim];
+                for (o, &v) in acc.iter_mut().zip(row) {
+                    *o += v;
+                }
+                n_on += 1;
+            }
+        }
+    }
+    // `whole` (plain whole-crop mean pooling, a full unconditional
+    // grid*grid summation — the more expensive of the two pooling passes)
+    // is needed for two INDEPENDENT reasons: it's the required fallback
+    // when literally zero patches land on the region's own mask (n_on ==
+    // 0), and it's the companion vector `domain_projection` trains/applies
+    // on. A redundancy audit found this running unconditionally even when
+    // domain_projection is off and nothing ever reads the second return
+    // value — compute it only when actually needed either way.
+    let compute_whole = need_whole || n_on == 0;
+    let whole_raw = if compute_whole { f.mean_pool() } else { Vec::new() };
+    let mut mask_aware = if n_on > 0 {
+        for v in &mut acc {
+            *v /= n_on as f32;
+        }
+        acc
+    } else {
+        whole_raw.clone()
+    };
+    l2_normalize(&mut mask_aware);
+    let mut whole_normed = if need_whole { whole_raw } else { Vec::new() };
+    l2_normalize(&mut whole_normed);
+    (mask_aware, whole_normed)
+}
+
+fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+    for x in v.iter_mut() {
+        *x /= norm;
+    }
 }

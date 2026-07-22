@@ -72,6 +72,42 @@ pub fn tile_leaf(rgba: &[u8], w: u32, h: u32, tile: u32, alpha_thr: u8) -> Vec<L
     out
 }
 
+/// RGBA -> RGB for an already-square `win`×`win` buffer (e.g. a region context
+/// crop from `worker::context_crop`), filling below-threshold-alpha pixels with
+/// the mean colour of the above-threshold ones — same technique as `tile_leaf`'s
+/// per-tile fill, but for a single complete buffer with no origin/partial-edge
+/// bookkeeping (a context crop is always fully populated, just clamp-padded).
+pub(crate) fn crop_to_rgb_meanfill(rgba: &[u8], win: u32, alpha_thr: u8) -> RgbImage {
+    let n = (win * win) as usize;
+    let mut rgb = vec![0u8; n * 3];
+    let mut valid = vec![false; n];
+    let (mut sr, mut sg, mut sb, mut cnt) = (0u64, 0u64, 0u64, 0u64);
+    for i in 0..n {
+        let (r, g, b, a) = (rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]);
+        rgb[i * 3] = r;
+        rgb[i * 3 + 1] = g;
+        rgb[i * 3 + 2] = b;
+        if a > alpha_thr {
+            valid[i] = true;
+            sr += r as u64;
+            sg += g as u64;
+            sb += b as u64;
+            cnt += 1;
+        }
+    }
+    if cnt > 0 {
+        let (mr, mg, mb) = ((sr / cnt) as u8, (sg / cnt) as u8, (sb / cnt) as u8);
+        for i in 0..n {
+            if !valid[i] {
+                rgb[i * 3] = mr;
+                rgb[i * 3 + 1] = mg;
+                rgb[i * 3 + 2] = mb;
+            }
+        }
+    }
+    RgbImage::from_raw(win, win, rgb).expect("crop rgb buffer")
+}
+
 /// Erode the opaque region of an RGBA buffer inward by `radius` px (Chebyshev),
 /// so the few-pixel background ring left by an imperfect cutout is excluded from
 /// detection (mirrors the Python preprocessing's score-mask erosion). Separable:

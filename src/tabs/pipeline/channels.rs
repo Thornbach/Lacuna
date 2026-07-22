@@ -106,7 +106,7 @@ pub fn color_deviation_map(rgb: &RgbImage, valid: &[bool]) -> Vec<f32> {
     out
 }
 
-fn rgb_to_lab(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+pub(crate) fn rgb_to_lab(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     let lin = |c: u8| {
         let c = c as f32 / 255.0;
         if c > 0.04045 {

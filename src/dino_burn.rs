@@ -11,11 +11,19 @@
 //!       - attention: q/v/o have bias, k none; 2D-axial RoPE (θ=100) on patch tokens
 //!       - LayerScale (lambda1); exact-erf GELU MLP (768→3072→768)
 //!   * multi-layer head: hidden states after block 12 (-1) and block 7 (-6),
-//!     last g·g patch tokens, L2-normalize each, concat ⇒ [1, g·g, 1536]
+//!     last g·g patch tokens, L2-normalize each, concat ⇒ [B, g·g, 1536]
 //!
 //! Weights come from port/dino_weights.safetensors (HF state_dict, clean names).
 //! Frozen inference only — no `#[derive(Module)]`, just loaded tensors + functional
 //! ops, so there is zero Recorder/burn-import machinery.
+//!
+//! Batch-generic: `forward`/`forward_debug` take `[B,3,H,W]` for any B ≥ 1 —
+//! every op either reads the batch dim from the input directly or broadcasts
+//! against it (the CLS/register tokens are the one exception, fixed learned
+//! `[1,·,768]` parameters repeated to B before concatenation). Lets a caller
+//! batch many region crops into ONE forward pass instead of one call each —
+//! the dominant per-region cost is the forward pass's fixed overhead, not
+//! image size, since every crop is resized to the same `res`×`res` first.
 
 use burn::tensor::{activation, backend::Backend, Tensor, TensorData};
 use burn::tensor::module::conv2d;
@@ -78,7 +86,7 @@ pub struct DinoDebug<B: Backend> {
     pub block0: Tensor<B, 3>,  // after block 0
     pub block6: Tensor<B, 3>,  // after block 6  (hidden_states[7])
     pub block11: Tensor<B, 3>, // after block 11 (hidden_states[12])
-    pub feat: Tensor<B, 3>,    // final multilayer [1, g·g, 1536]
+    pub feat: Tensor<B, 3>,    // final multilayer [B, g·g, 1536]
 }
 
 // ── weight loading ──────────────────────────────────────────────────────────────
@@ -144,7 +152,11 @@ impl<B: Backend> DinoV3Burn<B> {
         Ok(Self { device: device.clone(), patch_w, patch_b, cls, registers, blocks })
     }
 
-    /// Full forward: input `[1,3,H,W]` in [0,1] (raw RGB) → `[1, g·g, 1536]`.
+    /// Full forward: input `[B,3,H,W]` in [0,1] (raw RGB) → `[B, g·g, 1536]`.
+    /// `B` (batch) is read from `x` itself — every image in the batch shares
+    /// the same `H,W` (the caller resizes each crop to the same `res` first,
+    /// same as the single-image path always did per-call), so one forward
+    /// pass processes the whole batch instead of one call per image.
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 3> {
         self.forward_debug(x).feat
     }
@@ -152,7 +164,7 @@ impl<B: Backend> DinoV3Burn<B> {
     /// Forward keeping the intermediate activations used for validation.
     pub fn forward_debug(&self, x: Tensor<B, 4>) -> DinoDebug<B> {
         let dev = &self.device;
-        let [_, _, h, w] = x.dims();
+        let [batch, _, h, w] = x.dims();
         let gh = h / PATCH;
         let gw = w / PATCH;
         let npatch = gh * gw;
@@ -163,16 +175,21 @@ impl<B: Backend> DinoV3Burn<B> {
         let std = Tensor::<B, 1>::from_data(TensorData::new(STD.to_vec(), [3]), dev).reshape([1, 3, 1, 1]);
         let x = (x - mean) / std;
 
-        // Patch embed: conv2d stride 16 → [1,768,gh,gw] → [1, npatch, 768].
+        // Patch embed: conv2d stride 16 → [B,768,gh,gw] → [B, npatch, 768].
         let opt = ConvOptions::new([PATCH, PATCH], [0, 0], [1, 1], 1);
-        let patches = conv2d(x, self.patch_w.clone(), Some(self.patch_b.clone()), opt); // [1,768,gh,gw]
-        let patches = patches.reshape([1, DIM, npatch]).swap_dims(1, 2); // [1, npatch, 768]
+        let patches = conv2d(x, self.patch_w.clone(), Some(self.patch_b.clone()), opt); // [B,768,gh,gw]
+        let patches = patches.reshape([batch, DIM, npatch]).swap_dims(1, 2); // [B, npatch, 768]
 
-        // Prepend CLS + register tokens.
-        let emb = Tensor::cat(
-            vec![self.cls.clone(), self.registers.clone(), patches],
-            1,
-        ); // [1, ntok, 768]
+        // Prepend CLS + register tokens — loaded as fixed [1,·,768] learned
+        // parameters, so they need repeating to the batch's actual size
+        // before they can be concatenated with `patches` (skip the repeat
+        // at batch=1, the common single-region case, to avoid a pointless copy).
+        let (cls, registers) = if batch == 1 {
+            (self.cls.clone(), self.registers.clone())
+        } else {
+            (self.cls.clone().repeat_dim(0, batch), self.registers.clone().repeat_dim(0, batch))
+        };
+        let emb = Tensor::cat(vec![cls, registers, patches], 1); // [B, ntok, 768]
 
         // RoPE tables for the patch tokens only.
         let (cos, sin) = rope_tables::<B>(gh, gw, dev); // [npatch, 64]
@@ -196,7 +213,7 @@ impl<B: Backend> DinoV3Burn<B> {
         // Multi-layer head: last npatch tokens of blk11 & blk6, L2-norm, concat.
         let a = l2norm(patch_tokens(block11.clone(), ntok, npatch));
         let b = l2norm(patch_tokens(block6.clone(), ntok, npatch));
-        let feat = Tensor::cat(vec![a, b], 2); // [1, npatch, 1536]
+        let feat = Tensor::cat(vec![a, b], 2); // [B, npatch, 1536]
 
         DinoDebug {
             embed: emb,
@@ -239,7 +256,8 @@ fn l2norm<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
 
 /// Last `npatch` tokens (drop the prefix cls+registers).
 fn patch_tokens<B: Backend>(x: Tensor<B, 3>, ntok: usize, npatch: usize) -> Tensor<B, 3> {
-    x.slice([0..1, (ntok - npatch)..ntok, 0..DIM])
+    let batch = x.dims()[0];
+    x.slice([0..batch, (ntok - npatch)..ntok, 0..DIM])
 }
 
 /// rotate_half over the last dim of a [1,H,N,64] tensor: [-x2, x1].
@@ -277,23 +295,24 @@ fn block_forward<B: Backend>(
     ntok: usize,
     npatch: usize,
 ) -> Tensor<B, 3> {
+    let batch = x.dims()[0];
     // ── attention ──
     let h = layer_norm(x.clone(), &blk.n1_w, &blk.n1_b);
     let q = linear(h.clone(), &blk.q_w, Some(&blk.q_b));
     let k = linear(h.clone(), &blk.k_w, None);
     let v = linear(h, &blk.v_w, Some(&blk.v_b));
 
-    // [1,ntok,768] → [1,H,ntok,64]
-    let to_heads = |t: Tensor<B, 3>| t.reshape([1, ntok, HEADS, HEAD_DIM]).swap_dims(1, 2);
+    // [B,ntok,768] → [B,H,ntok,64]
+    let to_heads = |t: Tensor<B, 3>| t.reshape([batch, ntok, HEADS, HEAD_DIM]).swap_dims(1, 2);
     let q = apply_rope(to_heads(q), cos, sin, ntok, npatch);
     let k = apply_rope(to_heads(k), cos, sin, ntok, npatch);
     let v = to_heads(v);
 
     let scale = (HEAD_DIM as f32).powf(-0.5);
-    let scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(scale); // [1,H,ntok,ntok]
+    let scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(scale); // [B,H,ntok,ntok]
     let attn = activation::softmax(scores, 3);
-    let ctx = attn.matmul(v); // [1,H,ntok,64]
-    let ctx = ctx.swap_dims(1, 2).reshape([1, ntok, DIM]); // merge heads
+    let ctx = attn.matmul(v); // [B,H,ntok,64]
+    let ctx = ctx.swap_dims(1, 2).reshape([batch, ntok, DIM]); // merge heads
     let attn_out = linear(ctx, &blk.o_w, Some(&blk.o_b));
     let x = x + attn_out * blk.ls1.clone().reshape([1, 1, DIM]);
 

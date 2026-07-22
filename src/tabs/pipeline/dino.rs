@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use image::{imageops::FilterType, RgbImage};
 #[cfg(feature = "ort-backend")]
 use ort::value::Tensor as OrtTensor;
+use rayon::prelude::*;
 
 use crate::tabs::recon_train::model::{create_infer_device, InferBackend};
 
@@ -45,12 +46,42 @@ pub struct DinoExtractor {
     res:     u32,
     /// Wall-time (ms) of the most recent forward — for the pipeline timer.
     pub last_ms: f32,
+    /// Wall-time (ms) of the most recent call's image resize + CHW-repack
+    /// step (CPU, before the forward pass) — split out from `last_ms` so
+    /// callers can attribute cost accurately instead of it silently falling
+    /// into whatever bucket happens to wrap the call (a real reported
+    /// confusion: this used to be invisible, hidden inside a caller-side
+    /// "pool" timing bucket that was actually measuring something else).
+    pub last_prep_ms: f32,
 }
 
 pub struct DinoFeatures {
     pub feat: Vec<f32>, // tokens*dim row-major
     pub grid: usize,    // tokens per side (res/patch)
     pub dim:  usize,    // feature dim (1536)
+}
+
+impl DinoFeatures {
+    /// Mean-pool all `grid*grid` patch tokens into one `dim`-length embedding —
+    /// used to give a whole region (via its context crop) a single semantic
+    /// feature vector for unsupervised clustering, instead of per-patch scores.
+    pub fn mean_pool(&self) -> Vec<f32> {
+        let n = self.grid * self.grid;
+        let mut out = vec![0f32; self.dim];
+        if n == 0 {
+            return out;
+        }
+        for t in 0..n {
+            let row = &self.feat[t * self.dim..(t + 1) * self.dim];
+            for (o, &v) in out.iter_mut().zip(row) {
+                *o += v;
+            }
+        }
+        for o in &mut out {
+            *o /= n as f32;
+        }
+        out
+    }
 }
 
 /// Resolve the safetensors weights for the BURN path.
@@ -73,7 +104,7 @@ impl DinoExtractor {
         #[cfg(feature = "ort-backend")]
         if use_ort() {
             eprintln!("[dino] backend=ort (LACUNA_USE_ORT) {}", model_path.display());
-            return Ok(Self { model: Model::Ort(crate::tabs::build_session(model_path)?), res, last_ms: 0.0 });
+            return Ok(Self { model: Model::Ort(crate::tabs::build_session(model_path)?), res, last_ms: 0.0, last_prep_ms: 0.0 });
         }
         // Default: pure-Rust BURN.
         let device = create_infer_device();
@@ -81,14 +112,27 @@ impl DinoExtractor {
         eprintln!("[dino] backend=BURN ({}) weights={}",
                   crate::tabs::recon_train::model::backend_name(), wpath.display());
         let net = crate::dino_burn::DinoV3Burn::<InferBackend>::load(&wpath.to_string_lossy(), &device)?;
-        Ok(Self { model: Model::Burn(Box::new(net), device), res, last_ms: 0.0 })
+        Ok(Self { model: Model::Burn(Box::new(net), device), res, last_ms: 0.0, last_prep_ms: 0.0 })
     }
 
     pub fn res(&self) -> u32 { self.res }
 
-    /// Resize `img` to res×res, run the model, return per-patch features.
+    /// Resize `img` to the extractor's own configured res×res, run the
+    /// model, return per-patch features.
     pub fn features(&mut self, img: &RgbImage) -> Result<DinoFeatures, String> {
-        let res = self.res;
+        self.features_at(img, self.res)
+    }
+
+    /// Like `features`, but resizes to an explicit `res` instead of the
+    /// extractor's own configured resolution — lets a caller trade input
+    /// resolution for speed on a per-call basis without a second loaded
+    /// model instance (same weights; the Burn forward pass is already
+    /// resolution-agnostic, reading `H,W` straight off the input tensor —
+    /// confirmed when making it batch-generic — only the resize target and
+    /// resulting patch grid differ). Used for region-embedding crops, which
+    /// don't need the per-patch precision full-res per-tile detection does.
+    /// `res` must be a multiple of the model's patch size (16).
+    pub fn features_at(&mut self, img: &RgbImage, res: u32) -> Result<DinoFeatures, String> {
         let resized = image::imageops::resize(img, res, res, FilterType::Triangle);
         let n = (res * res) as usize;
         // CHW, [0,1] — identical layout for both backends (ImageNet-normalize is
@@ -138,6 +182,79 @@ impl DinoExtractor {
                 Ok(DinoFeatures { feat, grid, dim })
             }
         }
+    }
+
+    /// Batched variant of `features_at`: resizes every image to res×res and
+    /// runs them through ONE forward pass instead of one call per image,
+    /// returning one `DinoFeatures` per input in the same order. Exists
+    /// because the region-embedding step's cost is dominated by the forward
+    /// pass's fixed per-call overhead (not image size — every crop already
+    /// gets resized to the same fixed `res` regardless of its own size), so
+    /// calling it once per region (as `region_dino_embed` used to) scales
+    /// directly with region count; batching amortizes that overhead across
+    /// however many regions are passed in one call. `imgs` should be a
+    /// bounded chunk (the caller decides the chunk size), not every region
+    /// on a leaf at once — an unbounded batch risks a very large GPU
+    /// allocation for a leaf with hundreds of regions.
+    ///
+    /// The `ort` backend (non-default, opt-in via `LACUNA_USE_ORT`) was
+    /// never restructured for batching — falls back to a plain per-image
+    /// loop there, still correct, just without the speedup, since `ort`
+    /// isn't the path this app actually ships with.
+    pub fn features_batch_at(&mut self, imgs: &[RgbImage], res: u32) -> Result<Vec<DinoFeatures>, String> {
+        if imgs.is_empty() {
+            return Ok(Vec::new());
+        }
+        #[cfg(feature = "ort-backend")]
+        if matches!(self.model, Model::Ort(_)) {
+            return imgs.iter().map(|img| self.features_at(img, res)).collect();
+        }
+
+        let n = imgs.len();
+        let npx = (res * res) as usize;
+        let t_prep = std::time::Instant::now();
+        let mut data = vec![0f32; n * 3 * npx];
+        // Per-image resize + CHW-repack, in parallel — each image writes
+        // only to its own disjoint `3*npx`-sized chunk of `data`, so there's
+        // no aliasing between rayon tasks. Previously sequential and
+        // un-timed (its cost silently fell into a caller-side "pool"
+        // bucket that was really measuring something else entirely).
+        data.par_chunks_mut(3 * npx).zip(imgs.par_iter()).for_each(|(chunk, img)| {
+            let resized = image::imageops::resize(img, res, res, FilterType::Triangle);
+            for y in 0..res {
+                for x in 0..res {
+                    let px = resized.get_pixel(x, y);
+                    let idx = (y * res + x) as usize;
+                    chunk[idx] = px[0] as f32 / 255.0;
+                    chunk[npx + idx] = px[1] as f32 / 255.0;
+                    chunk[2 * npx + idx] = px[2] as f32 / 255.0;
+                }
+            }
+        });
+        self.last_prep_ms = t_prep.elapsed().as_secs_f32() * 1000.0;
+
+        let (net, device) = match &mut self.model {
+            #[cfg(feature = "ort-backend")]
+            Model::Ort(_) => unreachable!("ort case already returned above"),
+            Model::Burn(net, device) => (net, device),
+        };
+        let x = burn::tensor::Tensor::<InferBackend, 4>::from_data(
+            burn::tensor::TensorData::new(data, [n, 3, res as usize, res as usize]),
+            device,
+        );
+        let t_run = std::time::Instant::now();
+        let out = net.forward(x); // [n, tokens, 1536]
+        let dims = out.dims();
+        let feat_all = out.into_data().to_vec::<f32>()
+            .map_err(|e| format!("dino burn extract: {e:?}"))?;
+        self.last_ms = t_run.elapsed().as_secs_f32() * 1000.0;
+        let (tokens, dim) = (dims[1], dims[2]);
+        let grid = (tokens as f64).sqrt().round() as usize;
+        let per_img = tokens * dim;
+        Ok((0..n).map(|b| DinoFeatures {
+            feat: feat_all[b * per_img..(b + 1) * per_img].to_vec(),
+            grid, dim,
+        }).collect())
     }
 }
 

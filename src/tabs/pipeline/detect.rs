@@ -31,6 +31,13 @@ pub struct DetectResult {
     pub h:        usize,
     pub dino_map: Vec<f32>,  // raw kNN mean-dist, upscaled to tile (w*h)
     pub z_map:    Vec<f32>,  // per-tile robust z (w*h)
+    // z_res/z_color/med_a/med_b: exposed so the worker can score OTHER detectors'
+    // regions (e.g. few-shot head regions) against this same descriptor space for
+    // unsupervised clustering — see AnomalyRegion::descriptor's doc comment.
+    pub z_res:    Vec<f32>,
+    pub z_color:  Vec<f32>,
+    pub med_a:    f32,
+    pub med_b:    f32,
     pub mask:     Vec<bool>, // final binary (w*h)
     pub regions:  Vec<Region>,
     pub dino_ms:  u128,      // DINOv3 ort feature time
@@ -166,9 +173,12 @@ pub fn detect(
     let mut regions = extract_regions(&mask, out_w, out_h, params.min_area);
     for rg in &mut regions {
         rg.descriptor = region_descriptor(
-            rg, &z_dino, &z_res, &z_color, &lab_a, &lab_b, med_a, med_b, out_w);
+            rg.bbox, &rg.mask, rg.area, &z_dino, &z_res, &z_color, &lab_a, &lab_b, med_a, med_b, out_w);
     }
-    Ok(DetectResult { w: out_w, h: out_h, dino_map, z_map: z_dino, mask, regions, dino_ms, knn_ms })
+    Ok(DetectResult {
+        w: out_w, h: out_h, dino_map, z_map: z_dino, z_res, z_color, med_a, med_b,
+        mask, regions, dino_ms, knn_ms,
+    })
 }
 
 /// Per-tile raw signal ONLY (no z-score, no decision): bank kNN scores against
@@ -309,24 +319,30 @@ pub fn decide_global(
     let mask = morph_close(&mask, w, h, params.region_close_px as usize);
     let mut regions = extract_regions(&mask, w, h, params.min_area);
     for rg in &mut regions {
-        rg.descriptor = region_descriptor(rg, &z_dino, &z_res, &z_color, lab_a, lab_b, med_a, med_b, w);
+        rg.descriptor = region_descriptor(
+            rg.bbox, &rg.mask, rg.area, &z_dino, &z_res, &z_color, lab_a, lab_b, med_a, med_b, w);
     }
     DetectResult {
-        w, h, dino_map: dino_map.to_vec(), z_map: z_dino, mask, regions, dino_ms: 0, knn_ms: 0,
+        w, h, dino_map: dino_map.to_vec(), z_map: z_dino, z_res, z_color, med_a, med_b,
+        mask, regions, dino_ms: 0, knn_ms: 0,
     }
 }
 
 /// 8-D descriptor over a region's pixels: per-channel mean z, mean colour
 /// deviation direction (a,b), and shape (log-area, elongation, extent).
-fn region_descriptor(
-    rg: &Region, z_dino: &[f32], z_res: &[f32], z_color: &[f32],
+/// Takes raw `(bbox, mask, area)` rather than `&Region` so callers with a
+/// differently-typed region (e.g. `fewshot::FewShotRegion`) can score their
+/// own regions against these same z-maps for unsupervised clustering.
+pub(crate) fn region_descriptor(
+    bbox: [u32; 4], mask: &[bool], area: u32,
+    z_dino: &[f32], z_res: &[f32], z_color: &[f32],
     lab_a: &[f32], lab_b: &[f32], med_a: f32, med_b: f32, w: usize,
 ) -> [f32; 8] {
-    let [bx, by, bw, bh] = rg.bbox;
+    let [bx, by, bw, bh] = bbox;
     let (mut sd, mut sr, mut sc, mut sa, mut sb) = (0f32, 0f32, 0f32, 0f32, 0f32);
     for ly in 0..bh {
         for lx in 0..bw {
-            if !rg.mask[(ly * bw + lx) as usize] {
+            if !mask[(ly * bw + lx) as usize] {
                 continue;
             }
             let gi = (by + ly) as usize * w + (bx + lx) as usize;
@@ -337,22 +353,22 @@ fn region_descriptor(
             sb += lab_b[gi] - med_b;
         }
     }
-    let area = rg.area.max(1) as f32;
-    let (elong, extent) = region_shape(rg);
-    [sd / area, sr / area, sc / area, sa / area, sb / area, (1.0 + area).ln(), elong, extent]
+    let areaf = area.max(1) as f32;
+    let (elong, extent) = region_shape(bbox, mask, area);
+    [sd / areaf, sr / areaf, sc / areaf, sa / areaf, sb / areaf, (1.0 + areaf).ln(), elong, extent]
 }
 
 /// (elongation, extent) of a region: elongation = sqrt(eigenvalue ratio of the
 /// coordinate covariance) capped at 20 (line ≫1, blob ~1); extent = filled
 /// fraction of the bounding box.
-fn region_shape(rg: &Region) -> (f32, f32) {
-    let [_, _, bw, bh] = rg.bbox;
-    let extent = rg.area as f32 / (bw * bh).max(1) as f32;
+fn region_shape(bbox: [u32; 4], mask: &[bool], area: u32) -> (f32, f32) {
+    let [_, _, bw, bh] = bbox;
+    let extent = area as f32 / (bw * bh).max(1) as f32;
     let mut xs = Vec::new();
     let mut ys = Vec::new();
     for ly in 0..bh {
         for lx in 0..bw {
-            if rg.mask[(ly * bw + lx) as usize] {
+            if mask[(ly * bw + lx) as usize] {
                 xs.push(lx as f32);
                 ys.push(ly as f32);
             }

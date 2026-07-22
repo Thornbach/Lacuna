@@ -5,8 +5,8 @@
 //! here is genuinely shared: `recon_simple`'s trainer (the "Recon Train" tab
 //! actually in use) calls `apply_random_damage`, `augment_pair`, `tv_loss`,
 //! `confidence_loss`, and `recon_loss_from_logits` directly, and the
-//! Pipeline's hole detection (`worker.rs`) calls `fill_holes`/
-//! `refine_silhouette` directly.
+//! Pipeline (`worker.rs`) calls `refine_silhouette` directly for its
+//! reconstruction preview overlay.
 
 use std::{
     collections::VecDeque,

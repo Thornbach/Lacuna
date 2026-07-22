@@ -40,12 +40,18 @@ pub fn run(folder: &str) {
         recon_ckpt: Some(PathBuf::from(RECON)),
         head_path: Some(PathBuf::from(HEAD)),
         use_patchcore: false,
+        unsupervised_families: false,
+        domain_projection: false,
         head_tau: 0.85,
         head_grow: 0.7,
         seg_alpha_lo: 0.50,
         seg_chroma_min: 28,
         cluster_eps: 1.5,
         cluster_min_pts: 5,
+        cluster_algo: crate::settings::ClusterAlgo::Dbscan,
+        target_k: 0,
+        cut_mode: crate::settings::CutMode::FixedK,
+        adaptive_threshold: 8.0,
     };
 
     let (tx, rx) = mpsc::channel();

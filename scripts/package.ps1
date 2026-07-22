@@ -10,14 +10,15 @@
 
   Variants:
     gpu  (default)  cuda / NVIDIA GPU     -> Lacuna-v<ver>-gpu.zip   (fast)
+    wgpu            Vulkan/DX12/Metal GPU -> Lacuna-v<ver>-wgpu.zip  (cross-platform, no CUDA)
     cpu             ndarray, portable     -> Lacuna-v<ver>-cpu.zip   (no GPU needed, slow)
 
   Usage:
-    powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Variant gpu|cpu] [-Version 0.1.0] [-SkipBuild]
+    powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Variant gpu|wgpu|cpu] [-Version 0.1.0] [-SkipBuild]
 #>
 param(
     [string]$Version,
-    [ValidateSet("gpu", "cpu")][string]$Variant = "gpu",
+    [ValidateSet("gpu", "wgpu", "cpu")][string]$Variant = "gpu",
     [switch]$SkipBuild
 )
 $ErrorActionPreference = "Stop"
@@ -29,12 +30,16 @@ if (-not $Version) {
 }
 Write-Host "Packaging Lacuna v$Version ($Variant)" -ForegroundColor Cyan
 
-# 1. Build. gpu = default features (cuda, self-contained); cpu = ndarray (portable, no GPU).
+# 1. Build. gpu = default features (cuda, self-contained); wgpu = cross-platform GPU;
+#    cpu = ndarray (portable, no GPU).
 if (-not $SkipBuild) {
     Write-Host "Building release ($Variant)..." -ForegroundColor Cyan
     $manifest = Join-Path $root "Cargo.toml"
     if ($Variant -eq "cpu") {
         & cargo build --release --no-default-features --manifest-path $manifest
+    }
+    elseif ($Variant -eq "wgpu") {
+        & cargo build --release --no-default-features --features wgpu-gpu --manifest-path $manifest
     }
     else {
         & cargo build --release --manifest-path $manifest
