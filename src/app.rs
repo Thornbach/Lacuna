@@ -7,8 +7,8 @@ use egui_phosphor::regular as icon;
 use crate::settings::{AppDefaults, AppSettings};
 use crate::tabs::recon_train::model::backend_name;
 use crate::tabs::{
-    EroderTab, LeafSegTab, MorphologyTab, PipelineTab, ReconInferTab, ReconSimpleTab,
-    SorterTab, TilePickerTab, TrainTab,
+    EroderTab, FieldReviewTab, LeafSegTab, MorphologyTab, PipelineTab, ReconInferTab,
+    ReconSimpleTab, SorterTab, TilePickerTab, TrainTab,
 };
 use crate::ui_kit;
 use crate::widgets::ToastManager;
@@ -19,6 +19,7 @@ use crate::widgets::ToastManager;
 enum Tab {
     // production flow
     LeafSeg,
+    FieldReview,
     Pipeline,
     Train,
     Morphology,
@@ -35,7 +36,7 @@ enum Tab {
 
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsCategory {
-    General, Pipeline, ReconTrain, ReconInfer, LeafSeg,
+    General, Pipeline, ReconTrain, ReconInfer, LeafSeg, FieldReview,
     Eroder, Train, TilePicker, Morphology, Sorter,
 }
 
@@ -48,6 +49,7 @@ pub struct LacunaApp {
     recon_simple:  ReconSimpleTab,
     recon_infer:   ReconInferTab,
     leaf_seg:      LeafSegTab,
+    field_review:  FieldReviewTab,
     pipeline:      PipelineTab,
     train:         TrainTab,
     tile_picker:   TilePickerTab,
@@ -89,6 +91,7 @@ impl LacunaApp {
         let mut recon_simple  = ReconSimpleTab::new();
         let mut recon_infer   = ReconInferTab::new();
         let mut leaf_seg      = LeafSegTab::new();
+        let mut field_review  = FieldReviewTab::new();
         let mut pipeline      = PipelineTab::new();
         let mut train         = TrainTab::new();
         let mut tile_picker   = TilePickerTab::new();
@@ -98,6 +101,7 @@ impl LacunaApp {
         recon_simple.load_settings(&settings);
         recon_infer.load_settings(&settings);
         leaf_seg.load_settings(&settings);
+        field_review.load_settings(&settings);
         pipeline.load_settings(&settings);
         train.load_settings(&settings);
         tile_picker.load_settings(&settings);
@@ -106,7 +110,7 @@ impl LacunaApp {
         Self {
             active_tab: Tab::Pipeline, // production flow front and centre
             eroder, sorter, recon_simple, recon_infer,
-            leaf_seg, pipeline, train, tile_picker, morphology,
+            leaf_seg, field_review, pipeline, train, tile_picker, morphology,
             settings, toasts: ToastManager::new(),
             default_pick: None,
             settings_category: SettingsCategory::General,
@@ -130,6 +134,7 @@ impl LacunaApp {
     fn active_title(&self) -> &'static str {
         match self.active_tab {
             Tab::LeafSeg => "Leaf Segmentation",
+            Tab::FieldReview => "Field Review",
             Tab::Pipeline => "Integrated Pipeline",
             Tab::Train => "Train Detector",
             Tab::Morphology => "Morphology",
@@ -148,6 +153,7 @@ impl LacunaApp {
             || self.recon_simple.needs_repaint()
             || self.recon_infer.needs_repaint()
             || self.leaf_seg.needs_repaint()
+            || self.field_review.needs_repaint()
             || self.pipeline.needs_repaint()
             || self.train.needs_repaint()
             || self.tile_picker.needs_repaint()
@@ -158,7 +164,9 @@ impl LacunaApp {
     //
     // Grouped by WORKFLOW, not by model type — mirrors the old nav rail's own
     // 3-section split, just re-cut: File = process/analyze a dataset, Train =
-    // the two training workflows, Tools = the three standalone utilities.
+    // the three training workflows (Field Review teaches the segmentation
+    // model, Recon Train the reconstruction model, Train Detector the
+    // anomaly-classification head), Tools = the three standalone utilities.
 
     fn tab_button(ui: &mut Ui, tab: &mut Tab, target: Tab, label: &str) {
         if ui.selectable_label(*tab == target, label).clicked() {
@@ -185,6 +193,7 @@ impl LacunaApp {
                 Self::tab_button(ui, &mut self.active_tab, Tab::Morphology, "Morphology");
                 Self::tab_button(ui, &mut self.active_tab, Tab::ReconInfer, "Recon Infer");
                 ui.separator();
+                Self::tab_button(ui, &mut self.active_tab, Tab::FieldReview, "Field Review");
                 Self::tab_button(ui, &mut self.active_tab, Tab::ReconSimple, "Recon Train");
                 Self::tab_button(ui, &mut self.active_tab, Tab::Train, "Train Detector");
                 ui.separator();
@@ -219,7 +228,7 @@ impl LacunaApp {
             use SettingsCategory::*;
             for (cat, label) in [
                 (General, "General"), (Pipeline, "Pipeline"), (ReconTrain, "Recon Train"),
-                (ReconInfer, "Recon Infer"), (LeafSeg, "Leaf Seg"), (Eroder, "Eroder"),
+                (ReconInfer, "Recon Infer"), (LeafSeg, "Leaf Seg"), (FieldReview, "Field Review"), (Eroder, "Eroder"),
                 (Train, "Train"), (TilePicker, "Tile Picker"), (Morphology, "Morphology"),
                 (Sorter, "Sorter"),
             ] {
@@ -294,6 +303,7 @@ impl LacunaApp {
                 SettingsCategory::ReconTrain  => self.recon_simple.show_settings_panel(ui),
                 SettingsCategory::ReconInfer  => self.recon_infer.show_settings_panel(ui),
                 SettingsCategory::LeafSeg     => self.leaf_seg.show_settings_panel(ui),
+                SettingsCategory::FieldReview => self.field_review.show_settings_panel(ui),
                 SettingsCategory::Eroder      => self.eroder.show_settings_panel(ui),
                 SettingsCategory::Train       => self.train.show_settings_panel(ui),
                 SettingsCategory::TilePicker  => self.tile_picker.show_settings_panel(ui),
@@ -356,6 +366,7 @@ impl LacunaApp {
                         }
                     }
                     Tab::LeafSeg => { ui.label(RichText::new("Leaf Segmentation").small()); }
+                    Tab::FieldReview => { ui.label(RichText::new("Field Review").small()); }
                     Tab::Pipeline => { ui.label(RichText::new("Integrated Pipeline").small()); }
                     Tab::Train => { ui.label(RichText::new("Train Detector").small()); }
                     Tab::Morphology => { ui.label(RichText::new("Morphology").small()); }
@@ -499,6 +510,7 @@ impl eframe::App for LacunaApp {
                 Tab::ReconSimple => { self.recon_simple.show(ui, ctx, &mut self.toasts); }
                 Tab::ReconInfer  => { self.recon_infer.show(ui, ctx, &mut self.toasts); }
                 Tab::LeafSeg     => { self.leaf_seg.show(ui, ctx, &mut self.toasts); }
+                Tab::FieldReview => { self.field_review.show(ui, ctx, &mut self.toasts); }
                 Tab::Pipeline    => { self.pipeline.show(ui, ctx, &mut self.toasts); }
                 Tab::Train       => { self.train.show(ui, ctx, &mut self.toasts); }
                 Tab::Morphology  => { self.morphology.show(ui, ctx, &mut self.toasts); }
@@ -520,6 +532,7 @@ impl eframe::App for LacunaApp {
         self.recon_simple.save_settings(&mut self.settings);
         self.recon_infer.save_settings(&mut self.settings);
         self.leaf_seg.save_settings(&mut self.settings);
+        self.field_review.save_settings(&mut self.settings);
         self.pipeline.save_settings(&mut self.settings);
         self.train.save_settings(&mut self.settings);
         self.tile_picker.save_settings(&mut self.settings);

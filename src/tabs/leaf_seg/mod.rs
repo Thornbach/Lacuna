@@ -70,7 +70,7 @@ impl LeafSegTab {
             model_path:    None,
             conf:  0.25,
             iou:   0.45,
-            imgsz: 640,
+            imgsz: 1280, // see settings.rs::FieldReviewSettings::default for the measurement
             alpha_lo:   0.50,
             chroma_min: 28,
 

@@ -35,6 +35,12 @@ pub fn run(folder: &str) {
         meta_path: PathBuf::new(),
         tile_size: 256,
         margin_erode: 6,
+        detect_holes: true,
+        min_hole_area: 16,
+        // Off here on purpose: the smoke test asserts the pipeline's DEFAULT
+        // behaviour, and this filter is opt-in.
+        filter_margin_holes: false,
+        hole_margin_px: 16,
         dino_res: 512,
         conf: 0.25,
         recon_ckpt: Some(PathBuf::from(RECON)),
@@ -128,9 +134,16 @@ pub fn run(folder: &str) {
             dino_model: PathBuf::from(DINO),
             curations_dir: cur,
             out_path: out.join("fewshot_head_retrained.json"),
-            epochs: 60,
-            lr: 0.5,
-            l2_anchor: 0.05,
+            max_iters: 60,
+            l2_reg: 1.0, // sklearn's C — see RetrainCfg::l2_reg
+            max_patches_per_crop: 8,
+            validate_healthy_dir: None,
+            validate_tau: 0.6,
+            cold_start: false,
+            dump_dir: None,
+            base_set: None,
+            base_rows: 0,
+            anchor: 0.0, // no base head to anchor to in the smoke fixture
         },
         tx2,
         Arc::new(AtomicBool::new(false)),

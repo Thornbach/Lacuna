@@ -6,6 +6,7 @@
 //! burn GPU tensors are not freely shareable across threads).
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{mpsc, Arc},
     sync::atomic::{AtomicBool, Ordering},
@@ -33,16 +34,51 @@ use super::meta::DetectorMeta;
 use super::projection;
 use super::tiling::{crop_to_rgb_meanfill, tile_leaf};
 
-pub(crate) const CROP_WIN: u32 = 64; // context-crop size for the anomaly gallery + curation PNGs
+// Context-crop size for the anomaly gallery + curation PNGs.
+//
+// Raised 64 -> 128 on measured evidence, not intuition. A curated crop is
+// re-featurized by resizing it to DINO's 512px input, so the crop size sets how
+// many REAL pixels each DINO patch describes: 64px -> 2x2 real px/patch, vs the
+// 8x8 an inference tile gets. Training rows and inference patches therefore
+// described different physical scales — a train/deploy mismatch that only the
+// curation path suffers (dense training infers on the same tiles it trains on).
+//
+// Measured on held-out ground-truth leaves (1Help/eval/flywheel_fair.py, curated
+// crops for BOTH classes so extraction scale carries no label information):
+//     win  px/patch   IoU@0.85   recall@0.85
+//      64    2x2        0.204       0.539
+//     128    4x4        0.275       0.465     <- best IoU, +35%
+//     256    8x8        0.237       0.339
+// 256 matches inference scale exactly yet does WORSE: at a fixed patch budget a
+// larger window spends most of its patches on context rather than the region, so
+// 128 is the empirical optimum rather than the theoretically "matched" 256.
+//
+// NOTE: `crop_size` is persisted per region, so curations saved before this
+// change keep their own 64px geometry and stay loadable — but a curations folder
+// spanning the change trains on MIXED scales, which is the very inconsistency
+// this raise exists to remove. Prefer re-mining/re-curating over mixing.
+pub(crate) const CROP_WIN: u32 = 128;
 // Region-adaptive embedding crop (unsupervised_families clustering only, NOT
 // the gallery/curation crop above, which stays fixed at CROP_WIN): a big
-// region only showing its centroid neighborhood in a fixed 64px window loses
+// region only showing its centroid neighborhood in a fixed small window loses
 // most of its own extent. EMBED_PAD is the margin added around the region's
 // own bbox; MAX_EMBED_CROP caps the worst case so a huge region doesn't
-// build a huge crop (still only a 2x upsample into the 512px DINO model,
-// vs. today's routine 8x for the fixed 64px crop).
+// build a huge crop.
+//
+// MIN_EMBED_CROP is deliberately its OWN constant rather than reusing CROP_WIN
+// (which it used to clamp to): the two knobs answer different questions —
+// CROP_WIN is a supervised-training concern, this one only shapes unsupervised
+// clustering — and tying them meant tuning the curation crop silently moved
+// every clustering embedding too. Keeps its historical value so the CROP_WIN
+// raise above is a no-op for clustering.
 pub(crate) const EMBED_PAD: u32 = 16;
+pub(crate) const MIN_EMBED_CROP: u32 = 64;
 pub(crate) const MAX_EMBED_CROP: u32 = 256;
+/// Alpha at or below which a leaf pixel counts as transparent when hunting for
+/// interior holes. Matches the threshold `tile_leaf` already uses to decide
+/// what is valid leaf tissue, so a pixel can never be simultaneously "valid
+/// enough to detect on" and "transparent enough to be a hole".
+const HOLE_ALPHA_THR: u8 = 10;
 // PCA target dimensionality for the DINO-embedding unsupervised clustering path
 // (worker.rs's final clustering block). Fixed rather than user-tunable: a 3rd
 // interacting DBSCAN knob (on top of cluster_eps/cluster_min_pts) would compound
@@ -110,6 +146,30 @@ pub struct PipeConfig {
     pub meta_path:   PathBuf,
     pub tile_size:    u32,
     pub margin_erode: u32,
+    /// Flag interior holes (transparent regions enclosed by leaf) as defects on
+    /// geometry alone — see the hole block in `process_leaf`. Off means a hole
+    /// the segmenter cut out cleanly is invisible to every detector, because
+    /// transparent pixels are excluded from tiling before detection runs.
+    pub detect_holes:  bool,
+    /// Drop head-detected regions of the "Holes" family that never get far
+    /// enough inside the leaf to be a hole. A hole is *enclosed* tissue loss;
+    /// the head only sees appearance, and the leaf margin looks identical to a
+    /// hole rim once `tile_leaf` mean-fills the transparent side — so the head
+    /// fires along the outline and produces false positives there. Geometry is
+    /// the only thing that separates the two (see `exterior_distance`).
+    /// Off by default: it changes what gets reported, and that should be a
+    /// deliberate choice, not a silent one.
+    pub filter_margin_holes: bool,
+    /// How deep inside the leaf a "Holes" region must reach (px, distance to the
+    /// exterior) to count. Measured as the region's MAXIMUM depth, not its mean:
+    /// a genuine hole near the edge still has a core well inside, while a margin
+    /// artifact hugs the outline and never gets deep. Mean would punish real
+    /// holes for having a rim.
+    pub hole_margin_px:      u32,
+    /// Minimum hole area in leaf pixels; below this a transparent blob is
+    /// cutout anti-aliasing speckle rather than real damage. Mirrors
+    /// `1Help/config.py::min_hole_area`.
+    pub min_hole_area: u32,
     pub dino_res:     u32,
     pub conf:         f32,
     pub recon_ckpt:   Option<PathBuf>, // folder with gen.mpk; None = skip reconstruction
@@ -656,6 +716,86 @@ fn run_pipeline(
     Ok(())
 }
 
+/// Distance (in px, 4-connected) from every leaf pixel to the nearest EXTERIOR
+/// pixel — the background OUTSIDE the leaf, not the transparent interior of a
+/// hole. Exterior is defined by connectivity: transparent pixels reachable from
+/// the image border. A hole's transparent pixels are unreachable, so they get a
+/// large distance, exactly like the tissue around them.
+///
+/// This exists because appearance cannot separate a hole from the leaf margin.
+/// `tile_leaf` fills every transparent pixel with the tile's mean valid colour
+/// before DINO sees it, so a real hole and the leaf edge are both rendered as
+/// "flat mean colour next to tissue" — the same picture. Eroding the alpha
+/// (`margin_erode`) does not help either: it makes the eroded band transparent,
+/// which mean-fills it too, relocating the edge rather than removing it. The
+/// only signal that distinguishes the two is global geometry, i.e. this.
+///
+/// Returns `None` when the leaf has no exterior at all (it fills the frame), so
+/// callers skip filtering rather than treating "no reference" as "distance 0".
+fn exterior_distance(rgba: &[u8], w: usize, h: usize, alpha_thr: u8) -> Option<Vec<u32>> {
+    let n = w * h;
+    let transparent = |i: usize| rgba[i * 4 + 3] <= alpha_thr;
+
+    // Flood-fill the exterior inward from the border, through transparent pixels.
+    let mut dist = vec![u32::MAX; n];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    let mut seed = |i: usize, dist: &mut Vec<u32>, q: &mut VecDeque<usize>| {
+        if transparent(i) && dist[i] != 0 {
+            dist[i] = 0;
+            q.push_back(i);
+        }
+    };
+    for x in 0..w {
+        seed(x, &mut dist, &mut queue);
+        seed((h - 1) * w + x, &mut dist, &mut queue);
+    }
+    for y in 0..h {
+        seed(y * w, &mut dist, &mut queue);
+        seed(y * w + (w - 1), &mut dist, &mut queue);
+    }
+    if queue.is_empty() {
+        return None;
+    }
+    // Pass 1: grow the exterior through transparent pixels only (stays 0).
+    let mut head = 0usize;
+    let mut frontier: Vec<usize> = queue.iter().copied().collect();
+    while head < frontier.len() {
+        let i = frontier[head];
+        head += 1;
+        let (x, y) = (i % w, i / w);
+        let mut visit = |nx: usize, ny: usize, frontier: &mut Vec<usize>, dist: &mut Vec<u32>| {
+            let j = ny * w + nx;
+            if transparent(j) && dist[j] != 0 {
+                dist[j] = 0;
+                frontier.push(j);
+            }
+        };
+        if x > 0 { visit(x - 1, y, &mut frontier, &mut dist); }
+        if x + 1 < w { visit(x + 1, y, &mut frontier, &mut dist); }
+        if y > 0 { visit(x, y - 1, &mut frontier, &mut dist); }
+        if y + 1 < h { visit(x, y + 1, &mut frontier, &mut dist); }
+    }
+    // Pass 2: BFS outward from the exterior across EVERY pixel, giving each one
+    // its distance to the outside world.
+    let mut q: VecDeque<usize> = frontier.into_iter().collect();
+    while let Some(i) = q.pop_front() {
+        let d = dist[i];
+        let (x, y) = (i % w, i / w);
+        let mut step = |nx: usize, ny: usize, dist: &mut Vec<u32>, q: &mut VecDeque<usize>| {
+            let j = ny * w + nx;
+            if dist[j] == u32::MAX {
+                dist[j] = d + 1;
+                q.push_back(j);
+            }
+        };
+        if x > 0 { step(x - 1, y, &mut dist, &mut q); }
+        if x + 1 < w { step(x + 1, y, &mut dist, &mut q); }
+        if y > 0 { step(x, y - 1, &mut dist, &mut q); }
+        if y + 1 < h { step(x, y + 1, &mut dist, &mut q); }
+    }
+    Some(dist)
+}
+
 /// Run one leaf fully through tile -> detect -> restitch -> reconstruct ->
 /// morphology, then emit it. Streams a completed leaf so the UI can show it
 /// immediately; clustering happens once over all regions at the end.
@@ -769,11 +909,69 @@ fn process_leaf(
     let mut anomaly = vec![false; n_leaf];
     if let Some(head) = head {
         let tau_lo = cfg.head_grow.clamp(0.05, cfg.head_tau);
-        let (fs_mask, fs_regions) = fewshot::decide_global(
+        let (mut fs_mask, fs_regions) = fewshot::decide_global(
             &fs_prob, &fs_fam, &leaf_valid, lwu, lhu,
             cfg.head_tau, tau_lo, &head.hi_fam, fewshot::HEAD_MIN_REGION_PATCHES,
             params.region_close_px as usize, params.min_area,
         );
+
+        // ── margin false positives on the "Holes" class ──
+        // Filtered BEFORE the mask is OR'd into `anomaly` and before
+        // `n_regions` counts them, so a dropped region leaves no trace in the
+        // anomaly area, the region list, or the stats. Class is resolved by
+        // NAME, matching the convention the geometric hole block below already
+        // uses — rename the class and this stops applying to it.
+        let fs_regions = if !cfg.filter_margin_holes {
+            fs_regions
+        } else {
+            let holes_fam = head.families.iter()
+                .find(|(_, name)| name.trim().eq_ignore_ascii_case("holes"))
+                .and_then(|(idx, _)| idx.parse::<i32>().ok());
+            match (holes_fam, exterior_distance(&leaf_rgba, lwu, lhu, HOLE_ALPHA_THR)) {
+                (Some(fam), Some(dist)) => {
+                    let mut kept = Vec::with_capacity(fs_regions.len());
+                    let mut dropped = 0usize;
+                    for rg in fs_regions {
+                        let [bx, by, bw, bh] = rg.bbox;
+                        let mut depth = 0u32;
+                        if rg.family == fam {
+                            for ly in 0..bh {
+                                for lx in 0..bw {
+                                    if !rg.mask[(ly * bw + lx) as usize] {
+                                        continue;
+                                    }
+                                    let gi = (by + ly) as usize * lwu + (bx + lx) as usize;
+                                    depth = depth.max(dist[gi]);
+                                }
+                            }
+                        }
+                        if rg.family == fam && depth < cfg.hole_margin_px {
+                            // Clear its pixels so the leaf's anomaly area does not
+                            // still include a region nobody will ever see listed.
+                            for ly in 0..bh {
+                                for lx in 0..bw {
+                                    if rg.mask[(ly * bw + lx) as usize] {
+                                        fs_mask[(by + ly) as usize * lwu + (bx + lx) as usize] = false;
+                                    }
+                                }
+                            }
+                            dropped += 1;
+                            continue;
+                        }
+                        kept.push(rg);
+                    }
+                    if dropped > 0 {
+                        log(tx, format!(
+                            "leaf {}: -{dropped} margin 'Holes' region(s) (depth < {}px)",
+                            *leaf_idx + 1, cfg.hole_margin_px,
+                        ));
+                    }
+                    kept
+                }
+                _ => fs_regions, // no Holes class, or leaf fills the frame: nothing to do
+            }
+        };
+
         for i in 0..n_leaf {
             if fs_mask[i] { anomaly[i] = true; }
         }
@@ -981,6 +1179,98 @@ fn process_leaf(
                 dino_embed: Vec::new(), // head-absent path never computes region embeddings
                 dino_embed_whole: Vec::new(),
             });
+        }
+    }
+
+    // ── interior holes: geometry, not appearance ──
+    // A hole eaten clean through the leaf is TRANSPARENT after segmentation, so
+    // `tile_leaf` marks it invalid and every detector above skips it — the model
+    // never sees the one defect that is trivially identifiable. Only holes the
+    // segmenter FAILED to cut out (still opaque, showing background) get
+    // detected, which perversely means better segmentation finds fewer holes.
+    //
+    // Ported from `1Help/preprocessing.py::interior_holes`, whose own docstring
+    // records the same failure ("the border\hole failures"): transparent
+    // components NOT connected to the border are holes through the leaf, and are
+    // flagged directly as defects rather than treated as missing data. Run on
+    // the ORIGINAL alpha, not the `margin_erode`-eroded copy used for detection,
+    // which would inflate every hole by the erosion radius.
+    if cfg.detect_holes {
+        let holes_class = head.and_then(|h| {
+            h.families.iter()
+                .find(|(_, name)| name.trim().eq_ignore_ascii_case("holes"))
+                .and_then(|(idx, _)| idx.parse::<i32>().ok())
+        });
+        let transparent: Vec<bool> = (0..n_leaf)
+            .map(|i| leaf_rgba[i * 4 + 3] <= HOLE_ALPHA_THR)
+            .collect();
+        // Every transparent blob, then discard the ones touching the image
+        // border — those are the exterior background around the cutout.
+        let blobs = detect::extract_regions(&transparent, lwu, lhu, cfg.min_hole_area);
+        let mut n_holes = 0usize;
+        for rg in &blobs {
+            let [bx, by, bw, bh] = rg.bbox;
+            if bx == 0 || by == 0 || bx + bw >= lw || by + bh >= lh {
+                continue; // exterior background, not a hole through the leaf
+            }
+            // How much of this hole did an appearance detector already claim?
+            //
+            // This used to skip the hole entirely on ANY overlap, which was far
+            // too strict: a small hole's discoloured RIM is usually flagged on
+            // appearance, that rim touches the transparent blob, and the whole
+            // hole was then discarded — leaving only the margin drawn and the
+            // hole itself still invisible. Exactly the reported symptom, and it
+            // spared big holes only because their rims happened not to fire.
+            //
+            // The mask is now always filled in (a hole IS damage, whoever found
+            // it), and only the REGION record is suppressed when the hole is
+            // mostly claimed already — that is the case where a second region
+            // would double-count the same damage downstream.
+            let mut n_px = 0usize;
+            let mut n_already = 0usize;
+            for ly in 0..bh {
+                for lx in 0..bw {
+                    if !rg.mask[(ly * bw + lx) as usize] {
+                        continue;
+                    }
+                    n_px += 1;
+                    let gi = (by + ly) as usize * lwu + (bx + lx) as usize;
+                    if anomaly[gi] {
+                        n_already += 1;
+                    }
+                    anomaly[gi] = true;
+                }
+            }
+            // >50% already covered: an existing region is describing this hole,
+            // so adding another would report the same damage twice.
+            if n_px == 0 || n_already * 2 > n_px {
+                continue;
+            }
+            let crop = context_crop(&leaf_rgba, lw, lh, rg.centroid[0], rg.centroid[1], CROP_WIN);
+            all_regions.push(AnomalyRegion {
+                leaf: *leaf_idx,
+                bbox_leaf: rg.bbox,
+                mask: rg.mask.clone(),
+                descriptor: [0.0; 8],
+                // No head, or no class named "Holes"? Fall back to the novel
+                // bucket rather than guessing an id — a hole is certainly a
+                // defect, but mislabelling it as some other family would
+                // silently corrupt that family's statistics.
+                family: holes_class.unwrap_or(NOVEL_FAMILY),
+                crop,
+                crop_size: CROP_WIN,
+                dino_embed: Vec::new(),
+                dino_embed_whole: Vec::new(),
+            });
+            n_holes += 1;
+            n_regions += 1;
+        }
+        if n_holes > 0 {
+            log(tx, format!(
+                "leaf {}: +{n_holes} interior hole(s) flagged geometrically{}",
+                *leaf_idx + 1,
+                if holes_class.is_none() { " (no 'Holes' class in head — filed as novel)" } else { "" }
+            ));
         }
     }
 
@@ -1310,7 +1600,7 @@ fn embed_crop(
     centroid: [f32; 2], bbox_leaf: [u32; 4],
 ) -> (image::RgbImage, u32) {
     let [_bx, _by, bw, bh] = bbox_leaf;
-    let win = (bw.max(bh) + EMBED_PAD).clamp(CROP_WIN, MAX_EMBED_CROP);
+    let win = (bw.max(bh) + EMBED_PAD).clamp(MIN_EMBED_CROP, MAX_EMBED_CROP);
     let crop = context_crop(leaf_rgba, lw, lh, centroid[0], centroid[1], win);
     (crop_to_rgb_meanfill(&crop, win, 10), win)
 }

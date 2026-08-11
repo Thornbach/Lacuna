@@ -19,18 +19,22 @@ path = "src/main.rs"
 # Cross-platform GPU:cargo build --release --no-default-features --features wgpu-gpu
 # Portable CPU demo: cargo build --release --no-default-features
 #
-# ort-backend/ort-cuda/directml — OPTIONAL: re-add the old ONNX Runtime path (and its
-#   native DLLs) as a fallback. Compile it, then set LACUNA_USE_ORT=1 to select ort.
+# ort-backend/ort-cuda/directml — OPTIONAL: re-add the old ONNX Runtime path for
+#   DINO/YOLO (and its native DLLs) as a fallback. Compile it, then set
+#   LACUNA_USE_ORT=1 to select ort for THOSE two models.
+# `ort` the CRATE is a plain always-on dependency now (see [dependencies] below) —
+#   Field Review's interactive SAM click tool uses it unconditionally, so the
+#   ONNX Runtime native DLLs ARE part of every build regardless of these
+#   features. DINO/YOLO still default to BURN either way; these features only
+#   control whether THOSE TWO specifically can be switched to ort at runtime.
 [features]
 default  = ["cuda"]
 # ── BURN backends (DINOv3 + YOLO26 run pure-Rust; NO onnxruntime/cuDNN DLLs) ──
 cuda     = ["dep:burn-cuda"]   # NVIDIA GPU via CUDA driver + nvrtc (no cuDNN)
 wgpu-gpu = ["burn/wgpu"]       # any GPU via Vulkan/DX12/Metal
-# ── Optional ONNX Runtime fallback ──────────────────────────────────────────
-# DINO/YOLO now DEFAULT to the BURN reimplementations. `ort-backend` re-adds the
-# ort path (and the onnxruntime native DLLs); with it compiled, set
-# LACUNA_USE_ORT=1 at runtime to select ort instead of BURN.
-ort-backend = ["dep:ort"]                      # ort CPU EP
+# ── Optional ONNX Runtime backend for DINO/YOLO specifically (SAM always uses
+# ort regardless of these — see the dependency comment above) ──
+ort-backend = []                               # ort CPU EP for DINO/YOLO
 ort-cuda    = ["ort-backend", "ort/cuda"]      # + CUDA EP (needs cuDNN)
 directml    = ["ort-backend", "ort/directml"]  # + DirectML EP (no cuDNN)
 
@@ -38,6 +42,7 @@ directml    = ["ort-backend", "ort/directml"]  # + DirectML EP (no cuDNN)
 eframe     = { version = "0.29", features = ["persistence"] }
 egui       = "0.29"
 image      = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
+imageproc  = "0.25"   # contour tracing for Field Review's YOLO polygon export
 rayon      = "1"
 rfd        = "0.14"
 serde      = { version = "1", features = ["derive"] }
@@ -57,14 +62,18 @@ egui-phosphor = "0.7"   # icon font (matches egui 0.29) for the nav rail + butto
 # raw RGBA bytes + scalars (see leaf_complex_rust::analyze), so the version differs
 # harmlessly from our image 0.25.
 leaf_complex_rust_lib = { path = "../ShapeComplexity", package = "leaf_complex_rust" }
-# ONNX Runtime — now OPTIONAL (the BURN reimplementations of DINOv3 + YOLO26 are
-# the default). Only pulled in by the `ort-backend`/`ort-cuda`/`directml` features;
-# without them the app ships with zero onnxruntime/cuDNN DLLs. 2.x is prerelease so
-# pin explicitly.
-ort        = { version = "=2.0.0-rc.10", optional = true }
+# ONNX Runtime — always compiled in now. DINOv3/YOLO26 still default to the
+# BURN reimplementations (see `ort-backend` above for switching those two to
+# ort); Field Review's interactive SAM click tool has no BURN port and uses
+# ort unconditionally (SAM's ViT encoder + prompt/mask decoder are a separate,
+# much larger reimplementation project — not undertaken, see sam.rs's doc
+# comment). 2.x is prerelease so pin explicitly.
+ort        = { version = "=2.0.0-rc.10" }
 # Pure-Rust weight loading for the hand-written BURN DINOv3 reimplementation
 # (port/ → dino_burn.rs). No burn-import; we map safetensors → burn Tensors by name.
 safetensors = "0.4"
+argmin = "0.10"
+argmin-math = { version = "0.4", features = ["vec"] }
 
 [build-dependencies]
 winres = "0.1"

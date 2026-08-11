@@ -8,14 +8,17 @@ pub mod pipeline;
 pub mod train;
 pub mod tile_picker;
 pub mod morphology;
+pub mod mask_tools;
+pub mod field_review;
 
-#[cfg(feature = "ort-backend")]
 use std::path::Path;
 
-/// Build an ort `Session` (only with the optional `ort-backend` feature). Registers
-/// GPU execution providers by priority (DirectML → CUDA), falling back to CPU if none
-/// load. DINO/YOLO now default to BURN; this is used only when `LACUNA_USE_ORT=1`.
-#[cfg(feature = "ort-backend")]
+/// Build an ort `Session`. Registers GPU execution providers by priority
+/// (DirectML → CUDA), falling back to CPU if none load. `ort` is always
+/// compiled in now (Field Review's SAM click tool has no BURN port and uses
+/// it unconditionally — see `field_review::sam`'s doc comment); DINO/YOLO
+/// still default to BURN and only call this when `ort-backend` is compiled
+/// AND `LACUNA_USE_ORT=1` is set at runtime.
 pub fn build_session(path: &Path) -> Result<ort::session::Session, String> {
     #[allow(unused_mut)]
     let mut eps: Vec<ort::execution_providers::ExecutionProviderDispatch> = Vec::new();
@@ -68,7 +71,6 @@ pub fn gpu_diagnostics() -> String {
     }
 }
 
-#[cfg(feature = "ort-backend")]
 fn commit_session(
     path: &Path,
     eps:  Vec<ort::execution_providers::ExecutionProviderDispatch>,
@@ -100,3 +102,4 @@ pub use pipeline::PipelineTab;
 pub use train::TrainTab;
 pub use tile_picker::TilePickerTab;
 pub use morphology::MorphologyTab;
+pub use field_review::FieldReviewTab;

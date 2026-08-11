@@ -15,6 +15,7 @@ pub mod cluster;
 pub mod tiling;
 pub mod projection;
 pub mod worker;
+pub mod hardneg_mining;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -30,11 +31,18 @@ use egui_plot::{Plot, Points};
 
 use crate::settings::{AppDefaults, AppSettings, ClusterAlgo, CutMode};
 use crate::tabs::leaf_seg::inference::{list_images, scan_image_count};
+use crate::tabs::mask_tools::{
+    dist_to_polygon_boundary, dist_to_polyline, fill_polygon_mask, mask_connected_components,
+    point_in_polygon, reclaim_kerf, wand_flood_fill,
+};
 use crate::tabs::train::head::{
     spawn_retrain, RetrainCfg, RetrainMsg, spawn_calibrate, CalibrateCfg, rewrite_curated_family,
 };
 use crate::ui_kit;
 use crate::widgets::ToastManager;
+use hardneg_mining::{
+    spawn_mine, spawn_mine_unmarked, LeafMineInput, MineConfig, MineMsg, MineUnmarkedConfig,
+};
 use worker::{spawn_pipeline, AnomalyRegion, PipeConfig, PipeMsg, PipelineLeaf};
 
 const CLUSTER_PALETTE: [[u8; 3]; 10] = [
@@ -76,13 +84,13 @@ struct HardnegStamp {
 }
 
 #[derive(Clone, Copy)]
-enum Pick { Source, Output, Yolo, Dino, Bank, Meta, Recon, Head }
+enum Pick { Source, Output, Yolo, Dino, Bank, Meta, Recon, Head, MineHealthyDir, BaseSet }
 
 /// Active canvas tool — Photoshop-style, mutually exclusive, and always
 /// visibly indicated (see `show_toolbox`/the canvas options bar) so the same
 /// click/right-click gesture never silently means two different things.
 #[derive(Clone, Copy, PartialEq)]
-enum CanvasTool { Select, MarkHealthy, Brush, Eraser, Knife, Scissor, Lasso, Wand, Eyedropper }
+enum CanvasTool { Select, MarkHealthy, Brush, Eraser, Knife, Scissor, Lasso, Wand, Eyedropper, Polygon }
 
 /// One entry per undoable structural edit — `Ctrl+Z`/the gallery's "Undo"
 /// button always pops the most recent one, regardless of which action
@@ -121,6 +129,17 @@ pub struct PipelineTab {
     head_grow:       f32,
     tile_size:       u32,
     margin_erode_px: u32,
+    /// See `PipeConfig::detect_holes` — a hole eaten through the leaf is
+    /// TRANSPARENT after segmentation, so it is excluded from tiling and no
+    /// detector ever sees it. Only holes the segmenter failed to cut out get
+    /// found, which means better segmentation reports FEWER holes. On by
+    /// default; the geometry is unambiguous where the appearance model is blind.
+    detect_holes:    bool,
+    min_hole_area:   u32,
+    /// See `PipeConfig::filter_margin_holes` — suppress head-detected "Holes"
+    /// regions that hug the leaf outline instead of sitting inside it.
+    filter_margin_holes: bool,
+    hole_margin_px:      u32,
     conf:            f32,
     seg_alpha_lo:    f32,   // YOLO cutout edge tightness (feather start)
     seg_chroma_min:  i32,   // YOLO cutout background-chroma rejection
@@ -227,9 +246,19 @@ pub struct PipelineTab {
     // forking a duplicate class.
     head_cache:       Option<(PathBuf, fewshot::FewShotHead)>,
     selected_cluster: Option<i32>,
+    // Curate gallery: restrict to `selected_idx`'s own regions. Off by
+    // default (whole-dataset view, unchanged). Small regions are easy to
+    // miss in the dataset-wide gallery, which made it hard to tell when a
+    // single leaf was actually fully reviewed — this + the per-leaf status
+    // readout above the gallery fix that directly.
+    filter_leaf_only: bool,
     selected_region:  Option<usize>,   // anomaly highlighted with a bbox on the leaf
     gallery_page:     usize,           // anomaly gallery pagination
     scroll_to_selected: bool,          // one-shot: scroll the gallery to selected_region
+    // one-shot: scroll the LEAF strip to selected_idx. Set by the arrow-key
+    // hotkeys only, not by clicking — a click already puts the tile under the
+    // cursor, and re-centring it there would yank the strip out from under you.
+    scroll_to_leaf: bool,
     region_thumbs:    Vec<Option<egui::TextureHandle>>, // parallel to regions
     removed:          HashSet<usize>,       // region indices removed by the user
     struct_undo:      Vec<UndoEntry>,       // undo stack: one entry per removal or knife-cut gesture
@@ -243,6 +272,18 @@ pub struct PipelineTab {
     // Knife-cut originals also land here (see `UndoEntry::Cut`), restored the
     // same way a merge survivor's absorbed members would be.
     merged_away:      HashSet<usize>,
+    // Leaf indices the user threw out wholesale (bad segmentation, a cut-off
+    // leaf, debris the segmenter called a leaf). Distinct from `removed`, which
+    // rejects ONE region and — deliberately — keeps it as training signal: a
+    // rejected leaf is not a statement about any anomaly on it, it says the leaf
+    // itself should never have entered the run, so nothing on it may be counted,
+    // exported, or mined. Enforced centrally in `region_visible` so every
+    // existing counter/renderer/export inherits it; the two places that ask about
+    // a LEAF rather than a region (`count_fully_reviewed_leaves`,
+    // `build_unmarked_mine_inputs`) check it directly, since "all regions
+    // invisible" would otherwise read as "fully reviewed" and feed the whole
+    // rejected leaf to the miner as healthy tissue.
+    rejected_leaves:  HashSet<usize>,
     cluster_names:    HashMap<i32, String>,
     multi_selected:   HashSet<usize>,       // gallery tiles OR canvas rubber-band picks, for bulk reassign
     reassign_name:    String,               // target cluster name typed for bulk reassign
@@ -250,6 +291,16 @@ pub struct PipelineTab {
     quick_reassign_open: bool,              // "R" hotkey: standalone Move-to-cluster popup, independent of right-click
     quick_reassign_pos: egui::Pos2,         // pointer position captured when the "R" hotkey opened the popup
     last_clicked_region: Option<usize>,     // gallery shift-click range-select anchor
+    // Polygon tool: leaf-space nodes placed so far (not screen-space, so
+    // already-placed nodes stay correctly positioned across a pan/zoom
+    // mid-draw). `poly_pending` holds a closed polygon's rasterized stroke
+    // while its family-choice popup (below) is open — only used when NO
+    // region was selected at close time; a selected region commits
+    // immediately via the same path Brush already uses, no popup needed.
+    poly_points:  Vec<(f32, f32)>,
+    poly_pending: Option<HashSet<(i32, i32)>>,
+    poly_pick_pos: egui::Pos2,
+    poly_pick_name: String,                 // "or new:" text field in the family-choice popup
 
     // hard-negative capture: tile-picker-style stamp tool — a magnifier-assisted
     // fixed-size square follows the cursor on the leaf canvas; click stamps that
@@ -270,6 +321,37 @@ pub struct PipelineTab {
     retrain_stage:  String,
     retrain_log:    Vec<String>,
     retrain_done:   Option<PathBuf>, // Some(new head path) while the "use this head now" banner is showing
+    /// Diagnostic escape hatch for the "retrain keeps getting worse"
+    /// problem: zero-initializes any class that has curated rows THIS run
+    /// instead of warm-starting from the current head's own coefficients
+    /// (see `RetrainCfg::cold_start`'s doc comment for the full reasoning).
+    retrain_cold_start: bool,
+    /// Diagnostic: dump the exact training matrix + before/after head so an
+    /// independent solver can be fitted on identical data and compared —
+    /// see `RetrainCfg::dump_dir`. Writes hundreds of MB, so opt-in.
+    retrain_dump: bool,
+    /// See `RetrainCfg::base_set` — original training rows mixed into every
+    /// retrain so curations fine-tune the head instead of replacing it.
+    retrain_base_set:  Option<PathBuf>,
+    retrain_base_rows: usize,
+    /// See `RetrainCfg::anchor` - pull the L2 penalty toward the current head
+    /// instead of toward zero, so curations correct without competing for influence.
+    retrain_anchor:    f32,
+
+    // hard-negative MINING (flywheel, embedded, automated): scans an
+    // independent folder of known-healthy tiles for patches the CURRENT
+    // head wrongly calls defect, and stamps them into curations exactly
+    // like a manual hardneg stamp — see hardneg_mining.rs.
+    mine_healthy_dir:    Option<PathBuf>,
+    mine_tau:            f32,
+    mine_max:            usize,
+    mine_rx:             Option<mpsc::Receiver<MineMsg>>,
+    mine_cancel:         Arc<AtomicBool>,
+    mining:              bool,
+    mine_progress_done:  usize,
+    mine_progress_total: usize,
+    mine_found:          usize,
+    mine_log:            Vec<String>,
 
     // single file-dialog channel (tagged with which field it fills)
     pick_rx:      Option<(Pick, mpsc::Receiver<Option<PathBuf>>)>,
@@ -296,6 +378,10 @@ impl PipelineTab {
             head_grow:       0.7,
             tile_size:       256,
             margin_erode_px: 6,
+            detect_holes:    true,
+            min_hole_area:   16,
+            filter_margin_holes: false, // opt-in: changes what gets reported
+            hole_margin_px:      16,
             conf:            0.25,
             seg_alpha_lo:    0.0,
             seg_chroma_min:  0,
@@ -368,14 +454,17 @@ impl PipelineTab {
             clusters:         Vec::new(),
             head_cache:       None,
             selected_cluster: None,
+            filter_leaf_only: false,
             selected_region:  None,
             gallery_page:     0,
             scroll_to_selected: false,
+            scroll_to_leaf:     false,
             region_thumbs:    Vec::new(),
             removed:          HashSet::new(),
             struct_undo:      Vec::new(),
             persisted:        HashSet::new(),
             merged_away:      HashSet::new(),
+            rejected_leaves:  HashSet::new(),
             cluster_names:    HashMap::new(),
             multi_selected:   HashSet::new(),
             reassign_name:    String::new(),
@@ -383,6 +472,10 @@ impl PipelineTab {
             quick_reassign_open: false,
             quick_reassign_pos: egui::Pos2::new(400.0, 300.0),
             last_clicked_region: None,
+            poly_points: Vec::new(),
+            poly_pending: None,
+            poly_pick_pos: egui::Pos2::new(400.0, 300.0),
+            poly_pick_name: String::new(),
 
             canvas_tool:       CanvasTool::Select,
             hardneg_label:     "healthy".to_string(),
@@ -397,6 +490,22 @@ impl PipelineTab {
             retrain_stage:  String::new(),
             retrain_log:    Vec::new(),
             retrain_done:   None,
+            retrain_cold_start: false,
+            retrain_dump:       false,
+            retrain_base_set:   None,
+            retrain_base_rows:  10_000,
+            retrain_anchor:     1.0,
+
+            mine_healthy_dir:    None,
+            mine_tau:            0.6,
+            mine_max:            300,
+            mine_rx:             None,
+            mine_cancel:         Arc::new(AtomicBool::new(false)),
+            mining:              false,
+            mine_progress_done:  0,
+            mine_progress_total: 0,
+            mine_found:          0,
+            mine_log:            Vec::new(),
 
             pick_rx:      None,
             source_count: 0,
@@ -452,7 +561,7 @@ impl PipelineTab {
 
     // ── lifecycle ─────────────────────────────────────────────────────────
 
-    pub fn needs_repaint(&self) -> bool { self.running || self.retraining }
+    pub fn needs_repaint(&self) -> bool { self.running || self.retraining || self.mining }
 
     pub fn save_settings(&self, s: &mut AppSettings) {
         let r = &mut s.pipeline;
@@ -514,17 +623,19 @@ impl PipelineTab {
     pub fn show(&mut self, ui: &mut Ui, ctx: &Context, toasts: &mut ToastManager) {
         self.poll_worker(toasts);
         self.poll_retrain(toasts);
+        self.poll_mine(toasts);
         self.poll_preview(ctx);
         self.poll_calibration_preview(ctx);
         self.poll_calibration_detect(ctx, toasts);
         self.poll_calibrate(toasts);
+        self.handle_leaf_hotkeys(ctx, toasts);
 
         egui::TopBottomPanel::top("pipeline_stepper")
             .exact_height(28.0)
             .show_inside(ui, |ui| self.show_stepper(ui));
         egui::TopBottomPanel::top("pipeline_qol_bar")
             .exact_height(32.0)
-            .show_inside(ui, |ui| self.show_qol_bar(ui));
+            .show_inside(ui, |ui| self.show_qol_bar(ui, toasts));
         egui::SidePanel::left("pipeline_controls")
             .exact_width(ui_kit::CONTROL_W)
             .show_inside(ui, |ui| {
@@ -548,9 +659,11 @@ impl PipelineTab {
     /// the right cluster panel (`overlay_outline`/`overlay_alpha`) — pulled up
     /// here so they're reachable from every sub-tab, not just where they
     /// happened to live before.
-    fn show_qol_bar(&mut self, ui: &mut Ui) {
+    fn show_qol_bar(&mut self, ui: &mut Ui, toasts: &mut ToastManager) {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
+            self.show_reject_leaf_button(ui, toasts);
+            ui.separator();
             if let Some(cid) = self.selected_cluster {
                 let name = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
                 let col = cluster_color(cid);
@@ -598,6 +711,90 @@ impl PipelineTab {
                 });
             }
         });
+    }
+
+    /// Leaf-level keyboard navigation, for reviewing a large batch quickly:
+    /// `←`/`→` step through leaves, `X` rejects/restores the current one.
+    ///
+    /// Gated on nothing having keyboard focus, the same guard the tool hotkeys
+    /// use (`show_canvas`'s `focused` check) — otherwise typing an "x" into the
+    /// cluster-rename field would throw the leaf out of the run.
+    ///
+    /// Arrows CLAMP rather than wrap. Wrapping would silently send you from the
+    /// last leaf back to the first, which during a long review reads as "the
+    /// list reset" and is very easy to not notice.
+    fn handle_leaf_hotkeys(&mut self, ctx: &Context, toasts: &mut ToastManager) {
+        if self.results.is_empty() || ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        let (prev, next, reject) = ctx.input(|i| (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+            i.key_pressed(egui::Key::X),
+        ));
+        if prev || next {
+            let n = self.results.len();
+            let target = match self.selected_idx {
+                None => 0, // nothing selected yet: either arrow starts at the first leaf
+                Some(cur) if next => (cur + 1).min(n - 1),
+                Some(cur) => cur.saturating_sub(1),
+            };
+            if self.selected_idx != Some(target) {
+                self.selected_idx = Some(target);
+                self.selected_region = None;
+                self.overlay_tex = None;
+                self.scroll_to_leaf = true;
+            }
+        }
+        if reject {
+            if let Some(li) = self.selected_idx {
+                self.toggle_reject_leaf(li, toasts);
+            }
+        }
+    }
+
+    /// Whole-leaf reject/restore, first control in the top bar.
+    ///
+    /// Deliberately NOT next to the per-region reject in the gallery: that one
+    /// says "this detection is wrong" and keeps the region as training signal,
+    /// this one says "this leaf should not be in the run at all". Conflating them
+    /// would poison the curation set with rejects the user never meant as labels.
+    fn show_reject_leaf_button(&mut self, ui: &mut Ui, toasts: &mut ToastManager) {
+        let Some(li) = self.selected_idx else {
+            ui.add_enabled(false, egui::Button::new("✕ Reject leaf"))
+                .on_disabled_hover_text("Select a leaf in the gallery below first.");
+            return;
+        };
+        let rejected = self.rejected_leaves.contains(&li);
+        let n = self.regions.iter().filter(|r| r.leaf == li).count();
+
+        if rejected {
+            ui.label(RichText::new(format!("⚠ Leaf {li} rejected"))
+                .color(Color32::from_rgb(220, 110, 110)).strong());
+            if ui.button("✓ Restore leaf  (X)")
+                .on_hover_text("Put this leaf back into the run — its anomalies count and export again.\n\n\
+                                Hotkey: X   ·   ← / → step between leaves")
+                .clicked()
+            {
+                self.toggle_reject_leaf(li, toasts);
+            }
+        } else {
+            let btn = egui::Button::new(
+                RichText::new("✕ Reject leaf  (X)").color(Color32::WHITE).strong(),
+            ).fill(Color32::from_rgb(170, 55, 55));
+            if ui.add(btn)
+                .on_hover_text(format!(
+                    "Throw leaf {li} out of the run.\n\n\
+                     Its {n} anomalies stop being counted, it is left out of the CSV \
+                     and the exported images, and it is never mined for training data.\n\n\
+                     Reversible — press again to restore.\n\n\
+                     Hotkey: X   ·   ← / → step between leaves",
+                ))
+                .clicked()
+            {
+                self.toggle_reject_leaf(li, toasts);
+            }
+        }
     }
 
     /// Icon-only toolbox, rendered INSIDE the folders panel (`show_controls`)
@@ -661,6 +858,11 @@ impl PipelineTab {
                 &mut self.canvas_tool, &mut switched_to);
             tool_btn(ui, CanvasTool::Eyedropper, icon::EYEDROPPER, "Eyedropper",
                 "Hover a region to see its cluster, area, and review status — read-only, doesn't select anything.",
+                &mut self.canvas_tool, &mut switched_to);
+            tool_btn(ui, CanvasTool::Polygon, icon::POLYGON, "Polygon",
+                "Click to place nodes, click the first node again to close the shape and fill it. \
+                 With a region selected, it extends that region's own cluster; with nothing \
+                 selected, you'll be asked which cluster to assign.",
                 &mut self.canvas_tool, &mut switched_to);
         });
 
@@ -820,6 +1022,11 @@ impl PipelineTab {
                         let txt = self.inspect_info.clone().unwrap_or_else(|| "hover a region…".to_string());
                         ui.label(RichText::new(txt).small().color(ui_kit::ACCENT));
                     }
+                    CanvasTool::Polygon => {
+                        ui.label(RichText::new(
+                            "click = place node\nclick first node = close + fill\nEsc = cancel"
+                        ).small().color(Color32::GRAY));
+                    }
                 }
             });
 
@@ -961,7 +1168,7 @@ impl PipelineTab {
         }
 
         ui.add_space(10.0);
-        let can_start = self.all_paths_ok() && self.source_count > 0 && !self.running && !self.retraining;
+        let can_start = self.all_paths_ok() && self.source_count > 0 && !self.running && !self.retraining && !self.mining;
         ui.add_enabled_ui(can_start, |ui| {
             if ui_kit::primary_button(ui, "Run Pipeline").clicked() {
                 self.start();
@@ -1092,6 +1299,48 @@ impl PipelineTab {
                                 detection, so the background ring left by the cutout\n\
                                 isn't flagged as anomalous.");
             ui.add(egui::Slider::new(&mut self.margin_erode_px, 0..=20));
+            ui.end_row();
+            ui.label("Detect holes:")
+                .on_hover_text("Flag interior holes — transparent regions fully enclosed by\n\
+                                leaf — as defects on geometry alone.\n\n\
+                                A hole eaten clean through the leaf is TRANSPARENT after\n\
+                                segmentation, so it is excluded from tiling and no detector\n\
+                                ever looks at it. Without this, only holes the segmenter\n\
+                                FAILED to cut out (still showing background) are found — so\n\
+                                improving segmentation reports fewer holes, not more.\n\n\
+                                Regions land in the head's 'Holes' class when it has one,\n\
+                                otherwise in the novel bucket.");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.detect_holes, "");
+                ui.add_enabled(self.detect_holes,
+                    egui::DragValue::new(&mut self.min_hole_area).range(4..=2000).speed(4))
+                    .on_hover_text("Minimum hole area in pixels — below this a transparent\n\
+                                    blob is cutout anti-aliasing speckle, not damage.");
+                ui.label(RichText::new("min px").small().color(Color32::GRAY));
+            });
+            ui.end_row();
+            ui.label("Holes must be interior:")
+                .on_hover_text("Drop 'Holes' detections that hug the leaf OUTLINE instead of\n\
+                                sitting inside the leaf.\n\n\
+                                A hole is enclosed tissue loss, but the head only sees\n\
+                                appearance — and after transparent pixels are filled with the\n\
+                                tile's mean colour, the leaf margin looks exactly like a hole\n\
+                                rim. So the head fires along the edge. Raising 'Margin erode'\n\
+                                does NOT help: it makes the eroded band transparent, which\n\
+                                mean-fills it too, moving the edge instead of removing it.\n\n\
+                                This measures how deep the region reaches (distance to the\n\
+                                background OUTSIDE the leaf) and drops the shallow ones.\n\
+                                Applies ONLY to the class named 'Holes'.");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.filter_margin_holes, "");
+                ui.add_enabled(self.filter_margin_holes,
+                    egui::DragValue::new(&mut self.hole_margin_px).range(2..=200).speed(1))
+                    .on_hover_text("Minimum depth in px. A region whose DEEPEST pixel is closer\n\
+                                    than this to the outside is treated as a margin artifact.\n\
+                                    Raise it if margin false positives survive; lower it if\n\
+                                    genuine holes near the edge start disappearing.");
+                ui.label(RichText::new("min depth px").small().color(Color32::GRAY));
+            });
             ui.end_row();
             ui.label("Cutout edge:")
                 .on_hover_text("YOLO cutout edge tightness (alpha feather start).\n\
@@ -1234,6 +1483,8 @@ impl PipelineTab {
             Pick::Meta => &self.meta_path,
             Pick::Recon => &self.recon_ckpt,
             Pick::Head => &self.head_path,
+            Pick::MineHealthyDir => &self.mine_healthy_dir,
+            Pick::BaseSet => &self.retrain_base_set,
         }
     }
 
@@ -1253,20 +1504,52 @@ impl PipelineTab {
                 for i in 0..self.results.len() {
                     let n = self.results[i].n_regions;
                     let Some(tex) = &self.thumbs[i] else { continue };
+                    let rejected = self.rejected_leaves.contains(&i);
+                    let hover = if rejected {
+                        format!("leaf {i} — REJECTED ({n} regions excluded)")
+                    } else {
+                        format!("leaf {i} — {n} regions")
+                    };
                     let resp = ui
                         .add(egui::ImageButton::new((tex.id(), tex.size_vec2())))
-                        .on_hover_text(format!("leaf {i} — {n} regions"));
+                        .on_hover_text(hover);
+                    // Rejection has to be legible from the gallery, not just from
+                    // the top bar while the leaf happens to be selected — otherwise
+                    // a leaf silently drops out of the export with nothing on screen
+                    // saying so.
+                    if rejected {
+                        let red = Color32::from_rgb(190, 60, 60);
+                        ui.painter().rect_filled(
+                            resp.rect, 3.0, Color32::from_rgba_unmultiplied(150, 30, 30, 110),
+                        );
+                        ui.painter().rect_stroke(resp.rect, 3.0, egui::Stroke::new(2.0, red));
+                        ui.painter().line_segment(
+                            [resp.rect.left_top(), resp.rect.right_bottom()],
+                            egui::Stroke::new(2.0, red),
+                        );
+                        ui.painter().line_segment(
+                            [resp.rect.right_top(), resp.rect.left_bottom()],
+                            egui::Stroke::new(2.0, red),
+                        );
+                    }
                     if self.selected_idx == Some(i) {
                         ui.painter().rect_stroke(
                             resp.rect, 3.0,
                             egui::Stroke::new(2.0, Color32::from_rgb(120, 200, 130)),
                         );
+                        // Keep the keyboard-selected leaf on screen. Without this,
+                        // arrow-stepping past the visible end of the strip moves a
+                        // selection you can no longer see.
+                        if self.scroll_to_leaf {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
                     }
                     if resp.clicked() {
                         self.selected_idx = Some(i);
                         self.overlay_tex = None;
                     }
                 }
+                self.scroll_to_leaf = false; // one-shot, consumed above
                 // trailing tile: the leaf currently being processed
                 if self.running {
                     ui.vertical(|ui| {
@@ -1295,6 +1578,7 @@ impl PipelineTab {
         self.canvas_drag_start = None;
         self.wand_mask.clear();
         self.wand_mask_tex = None;
+        self.poly_points.clear();
         match tool {
             CanvasTool::MarkHealthy => self.hardneg_label = "healthy".to_string(),
             CanvasTool::Brush | CanvasTool::Wand => {
@@ -1621,7 +1905,7 @@ impl PipelineTab {
                     self.remove_hardneg_at(leaf_idx, lx, ly);
                 }
             }
-            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
+            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
                 self.undo_hardneg(leaf_idx);
             }
         }
@@ -1893,6 +2177,108 @@ impl PipelineTab {
                 })
             });
         }
+        CanvasTool::Polygon => {
+            let to_leaf = |p: egui::Pos2| ((p.x - img_rect.min.x) / s.max(1e-3), (p.y - img_rect.min.y) / s.max(1e-3));
+            // Clamp every placed node to the actual leaf bounds — a click
+            // in the canvas's letterboxed margin, or far outside the image
+            // while zoomed, otherwise produces leaf-space coordinates way
+            // beyond the real image, which fed a bbox spanning tens of
+            // thousands of pixels into the polygon fill and crashed on the
+            // resulting allocation (confirmed real, not theoretical).
+            let (lw, lh) = self.results.get(leaf_idx).map(|l| (l.w as f32, l.h as f32)).unwrap_or((0.0, 0.0));
+            if let Some(p) = resp.hover_pos() {
+                let (rx, ry) = to_leaf(p);
+                let hp = (rx.clamp(0.0, lw.max(1.0)), ry.clamp(0.0, lh.max(1.0)));
+                const SNAP_PX: f32 = 10.0;
+                let near_start = self.poly_points.len() >= 3 && {
+                    let (fx, fy) = self.poly_points[0];
+                    let first_screen = img_rect.min + egui::vec2(fx * s, fy * s);
+                    first_screen.distance(p) <= SNAP_PX
+                };
+                if resp.clicked() {
+                    if near_start {
+                        self.finish_polygon(leaf_idx, p, toasts);
+                    } else {
+                        self.poly_points.push(hp);
+                    }
+                }
+                if let Some(&(lx, ly)) = self.poly_points.last() {
+                    let last_screen = img_rect.min + egui::vec2(lx * s, ly * s);
+                    ui.painter().line_segment([last_screen, p], egui::Stroke::new(1.5, Color32::from_rgb(80, 170, 255)));
+                }
+                // `near_start` was computed before the click above may have
+                // just closed (and cleared) the polygon this same frame —
+                // re-check emptiness, don't trust the stale bool, or this
+                // indexes poly_points[0] on an empty vec and panics EXACTLY
+                // at the moment of closing (confirmed as the real crash,
+                // independent of area size).
+                if near_start && !self.poly_points.is_empty() {
+                    let (fx, fy) = self.poly_points[0];
+                    let first_screen = img_rect.min + egui::vec2(fx * s, fy * s);
+                    ui.painter().circle_stroke(first_screen, SNAP_PX, egui::Stroke::new(2.0, Color32::from_rgb(140, 230, 150)));
+                }
+            }
+            if self.poly_points.len() > 1 {
+                let screen: Vec<egui::Pos2> = self.poly_points.iter()
+                    .map(|&(x, y)| img_rect.min + egui::vec2(x * s, y * s)).collect();
+                ui.painter().add(egui::Shape::line(screen.clone(), egui::Stroke::new(1.5, Color32::from_rgb(80, 170, 255))));
+                for pt in screen {
+                    ui.painter().circle_filled(pt, 3.0, Color32::from_rgb(80, 170, 255));
+                }
+            } else if let Some(&(x, y)) = self.poly_points.first() {
+                let pt = img_rect.min + egui::vec2(x * s, y * s);
+                ui.painter().circle_filled(pt, 3.0, Color32::from_rgb(80, 170, 255));
+            }
+        }
+        }
+
+        // Polygon's family-choice popup — only shown when a polygon was
+        // closed with NOTHING selected (see `finish_polygon`); with a
+        // region selected, the fill commits immediately using that
+        // region's own family, same as Brush.
+        if let Some(stroke) = self.poly_pending.clone() {
+            let mut applied: Option<(i32, String)> = None;
+            let mut cancel = false;
+            egui::Window::new("Assign new region to")
+                .id(egui::Id::new("pipeline_poly_pick"))
+                .collapsible(false)
+                .resizable(false)
+                .current_pos(self.poly_pick_pos)
+                .show(ctx, |ui| {
+                    if let Some(id) = self.cluster_picker_rows(ui, "") {
+                        let name = self.class_display_name(id);
+                        applied = Some((id, name));
+                    }
+                    if !self.clusters.is_empty() {
+                        ui.separator();
+                    }
+                    ui.label(RichText::new("or new:").small().color(Color32::GRAY));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.poly_pick_name)
+                            .desired_width(140.0)
+                            .hint_text("cluster name"));
+                        if ui.button("Apply").clicked() {
+                            let name = self.poly_pick_name.trim().to_string();
+                            if !name.is_empty() {
+                                let id = self.resolve_cluster_id(&name);
+                                applied = Some((id, name));
+                            }
+                        }
+                    });
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            if let Some((_, name)) = applied {
+                self.poly_pending = None;
+                self.poly_pick_name.clear();
+                self.brush_stroke = stroke;
+                self.hardneg_label = name;
+                self.finish_brush_stroke(leaf_idx, toasts);
+            } else if cancel {
+                self.poly_pending = None;
+                self.poly_pick_name.clear();
+            }
         }
 
         // Wand's commit/discard actions — floated over the canvas rather than
@@ -1957,6 +2343,7 @@ impl PipelineTab {
                 else if i.key_pressed(egui::Key::L) { Some(CanvasTool::Lasso) }
                 else if i.key_pressed(egui::Key::W) { Some(CanvasTool::Wand) }
                 else if i.key_pressed(egui::Key::I) { Some(CanvasTool::Eyedropper) }
+                else if i.key_pressed(egui::Key::P) { Some(CanvasTool::Polygon) }
                 else { None }
             });
             if let Some(tool) = key_tool {
@@ -1978,6 +2365,8 @@ impl PipelineTab {
             self.quick_reassign_open = false;
             self.overlay_tex = None;
             self.lasso_points.clear(); // cancels a pending Scissor/Knife-polycut/Lasso path
+            self.poly_points.clear();
+            self.poly_pending = None;
         }
 
         // right-click context menu + Enter/Delete/Ctrl+Z/reassign-popup
@@ -2057,8 +2446,15 @@ impl PipelineTab {
             // focus) and gated on `canvas_tool != MarkHealthy` by the outer
             // `if`, so it stays mutually exclusive with the stamp tool's own
             // Ctrl+Z (undo_hardneg) — never both firing off one keypress.
-            if !focused && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
-                self.undo_last_edit(toasts);
+            if !focused && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+                // Mid-draw, Ctrl+Z undoes the last placed polygon NODE, not
+                // the last committed structural edit — nothing from this
+                // polygon has been committed yet.
+                if self.canvas_tool == CanvasTool::Polygon && !self.poly_points.is_empty() {
+                    self.poly_points.pop();
+                } else {
+                    self.undo_last_edit(toasts);
+                }
             }
             if do_confirm {
                 self.confirm_regions(&effective_sel, toasts);
@@ -2766,7 +3162,33 @@ impl PipelineTab {
                         }
                     }
                 });
+            ui.add_enabled_ui(self.selected_idx.is_some(), |ui| {
+                ui.checkbox(&mut self.filter_leaf_only, "This leaf only")
+                    .on_hover_text("Show only the regions on the leaf currently open in the \
+                                    Leaf view — small regions are easy to miss in the full \
+                                    dataset gallery, which makes it hard to tell when a single \
+                                    leaf is actually fully reviewed.");
+            });
         });
+
+        // Per-leaf review status — the concrete "is this leaf done" readout
+        // the dataset-wide counts above can't give you, and what the new
+        // unmarked-leaf-area miner (below) actually gates on per leaf.
+        if let Some(li) = self.selected_idx {
+            let leaf_regions: Vec<usize> = self.regions.iter().enumerate()
+                .filter(|(_, r)| r.leaf == li).map(|(i, _)| i).collect();
+            if !leaf_regions.is_empty() {
+                let pending = leaf_regions.iter()
+                    .filter(|&&i| self.region_visible(i) && !self.persisted.contains(&i))
+                    .count();
+                let (msg, color) = if pending == 0 {
+                    (format!("Leaf {li}: {} region(s), fully reviewed ✅", leaf_regions.len()), Color32::from_rgb(140, 230, 150))
+                } else {
+                    (format!("Leaf {li}: {pending} of {} region(s) still pending", leaf_regions.len()), Color32::from_rgb(230, 190, 90))
+                };
+                ui.label(RichText::new(msg).small().color(color));
+            }
+        }
         ui.separator();
 
         // ── flywheel: every Confirm/Reject/Reassign below already writes to
@@ -2791,6 +3213,9 @@ impl PipelineTab {
         {
             self.confirm_all_remaining(toasts);
         }
+        ui.separator();
+
+        self.show_mine_hardneg(ui);
         ui.separator();
 
         // ── in-place retrain: fine-tune the head from this run's curations
@@ -2818,7 +3243,65 @@ impl PipelineTab {
             ui.add_space(4.0);
         }
         let can_retrain = self.output_folder.is_some() && self.eff_head().is_some()
-            && self.eff_dino().is_some() && !self.retraining && !self.running;
+            && self.eff_dino().is_some() && !self.retraining && !self.running && !self.mining;
+        self.pick_row(ui, "Base training set (.bin)", Pick::BaseSet);
+        ui.horizontal(|ui| {
+            ui.label("base rows");
+            ui.add(egui::DragValue::new(&mut self.retrain_base_rows)
+                .range(0..=400_000).speed(1000));
+        });
+        ui.horizontal(|ui| {
+            ui.label("anchor to current head");
+            ui.add(egui::Slider::new(&mut self.retrain_anchor, 0.0..=1.0).fixed_decimals(2))
+                .on_hover_text("Pull the L2 penalty toward the CURRENT head instead of toward \
+                                zero.\n\n\
+                                0 = old behaviour: curations must out-vote the base rows for \
+                                influence.\n\
+                                1 = anchored: curations are the only data, and the penalty only \
+                                bounds how far the solution may travel. Where curations say \
+                                nothing, those weights simply stay put.\n\n\
+                                Measured on held-out leaves (LEARNS = agreement with held-out \
+                                curations, KEEPS = ground-truth IoU):\n\
+                                   no retrain          0.195 / 0.475\n\
+                                   base 50k, no anchor 0.969 / 0.460\n\
+                                   base 10k, no anchor 0.985 / 0.431\n\
+                                   base 10k + anchor   0.942 / 0.476  <- best\n\n\
+                                A brand-new class has no prior, so it falls back to ordinary \
+                                zero-centered L2 and can still learn freely.");
+        });
+        ui.label(RichText::new(
+            "Base rows stop a retrain from discarding what the head already knew (without \
+             them: IoU 0.475 -> 0.125). The anchor does the same job by bounding travel \
+             rather than out-voting the curations, so 10k rows + anchor beats 50k rows \
+             alone on BOTH learning and retention. Build a base set with \
+             1Help/eval/export_base_set.py."
+        ).small().color(Color32::GRAY));
+        ui.add_space(4.0);
+        ui.checkbox(&mut self.retrain_cold_start, "Train from scratch (no warm start)")
+            .on_hover_text("Every retrain already reads ALL accumulated curations, not just new \
+                            ones — this only changes where the solver STARTS. Normally it warm-\
+                            starts from the current head's own coefficients; with this on, any \
+                            class that has curated examples this run starts from zero instead, so \
+                            its result depends only on the curated evidence itself, not on \
+                            whatever the head happened to already believe (which may itself be a \
+                            degraded result from an earlier retrain). Classes with NO curated \
+                            examples in this output folder's history are unaffected either way — \
+                            there's nothing to retrain them from, so they keep their existing \
+                            (e.g. original bulk-trained) weights exactly as normal retrain does. \
+                            Good for diagnosing a retrain that keeps getting worse: if this comes \
+                            out meaningfully different (and better), the warm start was the \
+                            problem; if it's the same or worse, look at the curated data instead.");
+        ui.checkbox(&mut self.retrain_dump, "Dump training data (diagnostics)")
+            .on_hover_text("Writes <output>/retrain_diag/: retrain_dump.bin (the EXACT feature \
+                            rows, classes and weights this retrain trains on) and \
+                            retrain_diag.json (per-class coefficient norms + intercepts before \
+                            and after, plus solver settings and convergence). Lets an \
+                            independent solver be fitted on byte-identical data, so the DATA and \
+                            the SOLVER can finally be told apart — every data-side explanation \
+                            for 'retrains come back too conservative' has tested null so far, and \
+                            this holds the data fixed to isolate warm-start/freeze/L-BFGS. \
+                            The .bin is rows x dim x 4 bytes — often several hundred MB — so \
+                            leave this off for normal runs.");
         ui.horizontal(|ui| {
             ui.add_enabled_ui(can_retrain, |ui| {
                 if ui.button("🔄 Retrain from curations")
@@ -2865,6 +3348,7 @@ impl PipelineTab {
             .filter(|&i| {
                 self.region_visible(i)
                     && self.selected_cluster.map_or(true, |c| self.labels[i] == c)
+                    && (!self.filter_leaf_only || self.selected_idx.map_or(true, |li| self.regions[i].leaf == li))
             })
             .collect();
         // group by cluster (stable within each cluster, so pagination stays
@@ -3046,6 +3530,7 @@ impl PipelineTab {
         self.struct_undo.clear();
         self.persisted.clear();
         self.merged_away.clear();
+        self.rejected_leaves.clear();
         self.cluster_names.clear();
         self.selected_cluster = None;
         self.selected_region = None;
@@ -3056,12 +3541,34 @@ impl PipelineTab {
         self.recut_threshold = self.adaptive_threshold;
     }
 
-    /// A region counts as visible unless it's been rejected by the user OR
-    /// absorbed into another region by `merge_touching_regions` — everything
-    /// that iterates/renders/counts regions should gate on this, not on
-    /// `removed` alone, now that merges can also hide an index.
+    /// A region counts as visible unless it's been rejected by the user, absorbed
+    /// into another region by `merge_touching_regions`, or sits on a leaf the user
+    /// threw out entirely — everything that iterates/renders/counts regions should
+    /// gate on this, not on `removed` alone, now that merges and whole-leaf
+    /// rejection can also hide an index.
     fn region_visible(&self, i: usize) -> bool {
-        !self.removed.contains(&i) && !self.merged_away.contains(&i)
+        if self.removed.contains(&i) || self.merged_away.contains(&i) {
+            return false;
+        }
+        // An out-of-range index stays visible rather than silently vanishing:
+        // callers that hand this a bad index have a bug worth surfacing where it
+        // happens, and this gate is not the place to swallow it.
+        self.regions.get(i).map_or(true, |r| !self.rejected_leaves.contains(&r.leaf))
+    }
+
+    /// Toggle whole-leaf rejection. Reversible on purpose — it is one click in a
+    /// top bar, next to the destructive-looking controls, and an accidental press
+    /// would otherwise silently drop a leaf's anomalies from the export with no
+    /// way back short of re-running the pipeline.
+    fn toggle_reject_leaf(&mut self, li: usize, toasts: &mut ToastManager) {
+        if self.rejected_leaves.remove(&li) {
+            toasts.success(format!("Leaf {li} restored"));
+        } else {
+            self.rejected_leaves.insert(li);
+            let n = self.regions.iter().filter(|r| r.leaf == li).count();
+            toasts.success(format!("Leaf {li} rejected — {n} anomalies excluded"));
+        }
+        self.overlay_tex = None;  // canvas overlay is cached; force a repaint
     }
 
     fn all_paths_ok(&self) -> bool {
@@ -3125,6 +3632,10 @@ impl PipelineTab {
                 meta_path: meta,
                 tile_size: self.tile_size,
                 margin_erode: self.margin_erode_px,
+                detect_holes: self.detect_holes,
+                min_hole_area: self.min_hole_area,
+                filter_margin_holes: self.filter_margin_holes,
+                hole_margin_px: self.hole_margin_px,
                 dino_res: 512,
                 conf: self.conf,
                 recon_ckpt: self.eff_recon(),
@@ -3231,6 +3742,10 @@ impl PipelineTab {
                 meta_path: meta,
                 tile_size: self.tile_size,
                 margin_erode: self.margin_erode_px,
+                detect_holes: self.detect_holes,
+                min_hole_area: self.min_hole_area,
+                filter_margin_holes: self.filter_margin_holes,
+                hole_margin_px: self.hole_margin_px,
                 dino_res: 512,
                 conf: self.conf,
                 recon_ckpt: self.eff_recon(),
@@ -3588,9 +4103,31 @@ impl PipelineTab {
                 dino_model: dino,
                 curations_dir,
                 out_path,
-                epochs: 150,
-                lr: 0.5,
-                l2_anchor: 0.05,
+                // Full incident history in head.rs's RetrainCfg doc comments
+                // and `retrain`'s own comments. Short version: an
+                // anchor-toward-the-base-head scheme never worked (three
+                // rounds of tuning it), replaced with standard zero-centered
+                // L2; fixed-epoch/fixed-lr gradient descent was ALSO a direct
+                // root cause of repeated under-convergence bugs, replaced with
+                // a real L-BFGS solve (`max_iters` is a safety ceiling now,
+                // not a target).
+                max_iters: 2000,
+                // sklearn's C, matching the base head's own
+                // LogisticRegression(C=1.0). Was 0.02 as a RAW coefficient,
+                // which made the effective strength ~34x too strong and
+                // collapsed every retrained class — see RetrainCfg::l2_reg.
+                l2_reg: 1.0,
+                max_patches_per_crop: 8,
+                // Reuses whatever folder Mining (above) already points at,
+                // if any — no separate setting needed, and it stays purely
+                // informational (logged, never blocks).
+                validate_healthy_dir: self.mine_healthy_dir.clone(),
+                validate_tau: self.mine_tau,
+                cold_start: self.retrain_cold_start,
+                dump_dir: self.retrain_dump.then(|| out.join("retrain_diag")),
+                base_set: self.retrain_base_set.clone(),
+                base_rows: self.retrain_base_rows,
+                anchor: self.retrain_anchor,
             },
             tx,
             self.retrain_cancel.clone(),
@@ -3629,6 +4166,229 @@ impl PipelineTab {
         if done {
             self.retraining = false;
             self.retrain_rx = None;
+        }
+    }
+
+    // ── hard-negative mining (automated, patch-level) ───────────────────────
+
+    fn show_mine_hardneg(&mut self, ui: &mut Ui) {
+        ui_kit::section_header(ui, "Mine hard negatives");
+        ui.label(RichText::new(
+            "Scan a folder of KNOWN-HEALTHY tiles for patches the current head \
+             wrongly calls defect, and stamp them as new hard-negative curations \
+             — the automated, patch-level counterpart to manually stamping with \
+             the Hardneg tool above.")
+            .small().color(Color32::GRAY));
+        self.pick_row(ui, "Healthy tiles folder", Pick::MineHealthyDir);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("τ_mine").small())
+                .on_hover_text("A patch is mined when defect_prob ≥ this value \
+                                 — matches the original Python pipeline's \
+                                 tau_mine default of 0.6.");
+            ui.add(egui::Slider::new(&mut self.mine_tau, 0.3..=0.95).fixed_decimals(2));
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Cap").small())
+                .on_hover_text("Max hard negatives this run can add. Every one \
+                                 mined permanently adds to curations/labels.jsonl \
+                                 and gets re-featurized on EVERY future Retrain \
+                                 — keep this modest.");
+            ui.add(egui::DragValue::new(&mut self.mine_max).range(50..=2000).speed(10));
+        });
+        let can_mine = self.output_folder.is_some() && self.eff_head().is_some()
+            && self.eff_dino().is_some() && self.mine_healthy_dir.is_some()
+            && !self.running && !self.retraining && !self.mining;
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(can_mine, |ui| {
+                if ui.button("⛏ Mine hard negatives").clicked() {
+                    self.start_mine();
+                }
+            });
+            if self.mining {
+                ui_kit::busy(ui, &format!("mining… {} found", self.mine_found));
+            }
+        });
+        if self.mining && self.mine_progress_total > 0 {
+            let frac = self.mine_progress_done as f32 / self.mine_progress_total as f32;
+            ui.add(egui::ProgressBar::new(frac).show_percentage());
+        }
+        if !self.mine_log.is_empty() {
+            egui::ScrollArea::vertical().max_height(80.0).id_salt("pipeline_mine_log").show(ui, |ui| {
+                for line in self.mine_log.iter().rev().take(20) {
+                    ui.label(RichText::new(line).small());
+                }
+            });
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(RichText::new(
+            "Or: mine the area of every fully-reviewed leaf already loaded \
+             here that ISN'T covered by any anomaly region — no separate \
+             healthy-tile folder needed, since curating this batch already \
+             tells you what's healthy. \"Fully reviewed\" = every region \
+             detected on that leaf has been confirmed or rejected, nothing \
+             left pending.")
+            .small().color(Color32::GRAY));
+        let n_reviewed = self.count_fully_reviewed_leaves();
+        ui.label(RichText::new(format!("{n_reviewed} fully-reviewed leaf(ves) eligible")).small().color(Color32::GRAY));
+        let can_mine_unmarked = self.output_folder.is_some() && self.eff_head().is_some()
+            && self.eff_dino().is_some() && n_reviewed > 0
+            && !self.running && !self.retraining && !self.mining;
+        ui.add_enabled_ui(can_mine_unmarked, |ui| {
+            if ui.button("⛏ Mine unmarked leaf area").clicked() {
+                self.start_mine_unmarked();
+            }
+        });
+    }
+
+    /// A leaf counts as eligible once every region detected on it has been
+    /// acted on (confirmed or rejected) — a leaf the detector never flagged
+    /// at all is skipped too, not because it's unsafe, but because a
+    /// tau-gated scan of it is expected to find nothing (the same head-ish
+    /// scoring already said "no" there once) and would just cost a wasted
+    /// DINO pass.
+    fn count_fully_reviewed_leaves(&self) -> usize {
+        (0..self.results.len()).filter(|&li| {
+            if self.rejected_leaves.contains(&li) {
+                return false; // thrown out, not reviewed — never a mining candidate
+            }
+            let mut any = false;
+            let mut all_done = true;
+            for (i, r) in self.regions.iter().enumerate() {
+                if r.leaf != li { continue; }
+                any = true;
+                if self.region_visible(i) && !self.persisted.contains(&i) { all_done = false; }
+            }
+            any && all_done
+        }).count()
+    }
+
+    /// Builds one `LeafMineInput` per fully-reviewed leaf: `marked` is every
+    /// region ever detected there (visible OR removed/rejected — a rejected
+    /// region already has its own `"source":"reject"` crop, re-mining it here
+    /// would just duplicate it) OR'd onto a leaf-sized canvas, EXCEPT
+    /// merged-away entries, whose area the surviving merged region's own
+    /// mask already covers.
+    fn build_unmarked_mine_inputs(&self) -> Vec<LeafMineInput> {
+        let mut out = Vec::new();
+        for (leaf_idx, leaf) in self.results.iter().enumerate() {
+            // A rejected leaf must never be mined. `region_visible` already hides
+            // all its regions, which makes the fully_reviewed test below pass
+            // trivially — so without this guard the miner would treat every
+            // unmarked pixel of a leaf the user threw out as healthy tissue and
+            // write it straight into the training set as a hard negative.
+            if self.rejected_leaves.contains(&leaf_idx) { continue; }
+            let leaf_regions: Vec<usize> = self.regions.iter().enumerate()
+                .filter(|(_, r)| r.leaf == leaf_idx).map(|(i, _)| i).collect();
+            if leaf_regions.is_empty() { continue; }
+            let fully_reviewed = leaf_regions.iter()
+                .all(|&i| !self.region_visible(i) || self.persisted.contains(&i));
+            if !fully_reviewed { continue; }
+
+            let (w, h) = (leaf.w as usize, leaf.h as usize);
+            let mut marked = vec![false; w * h];
+            for &i in &leaf_regions {
+                if self.merged_away.contains(&i) { continue; }
+                let r = &self.regions[i];
+                let [bx, by, bw, bh] = r.bbox_leaf;
+                for yy in 0..bh {
+                    for xx in 0..bw {
+                        if !r.mask[(yy * bw + xx) as usize] { continue; }
+                        let (gx, gy) = ((bx + xx) as usize, (by + yy) as usize);
+                        if gx < w && gy < h { marked[gy * w + gx] = true; }
+                    }
+                }
+            }
+            let Some(rgba) = image::RgbaImage::from_raw(leaf.w, leaf.h, leaf.rgba.clone()) else { continue };
+            out.push(LeafMineInput { leaf_idx, src: leaf.src.clone(), rgba, marked });
+        }
+        out
+    }
+
+    fn start_mine_unmarked(&mut self) {
+        let (Some(out), Some(head), Some(dino)) = (
+            self.output_folder.clone(), self.eff_head(), self.eff_dino(),
+        ) else { return };
+        let leaves = self.build_unmarked_mine_inputs();
+        if leaves.is_empty() { return; }
+        self.mine_log.clear();
+        self.mine_cancel = Arc::new(AtomicBool::new(false));
+        self.mining = true;
+        self.mine_progress_done = 0;
+        self.mine_progress_total = 0;
+        self.mine_found = 0;
+        let (tx, rx) = mpsc::channel();
+        self.mine_rx = Some(rx);
+        spawn_mine_unmarked(
+            leaves,
+            MineUnmarkedConfig {
+                head_path: head,
+                dino_model: dino,
+                curations_dir: out.join("curations"),
+                tau_mine: self.mine_tau,
+                hardneg_tile: self.hardneg_tile,
+                max_hardneg: self.mine_max,
+            },
+            tx,
+            self.mine_cancel.clone(),
+        );
+    }
+
+    fn start_mine(&mut self) {
+        let (Some(out), Some(head), Some(dino), Some(healthy_dir)) = (
+            self.output_folder.clone(), self.eff_head(), self.eff_dino(), self.mine_healthy_dir.clone(),
+        ) else { return };
+        self.mine_log.clear();
+        self.mine_cancel = Arc::new(AtomicBool::new(false));
+        self.mining = true;
+        self.mine_progress_done = 0;
+        self.mine_progress_total = 0;
+        self.mine_found = 0;
+        let (tx, rx) = mpsc::channel();
+        self.mine_rx = Some(rx);
+        spawn_mine(
+            MineConfig {
+                healthy_dir,
+                head_path: head,
+                dino_model: dino,
+                curations_dir: out.join("curations"), // matches start_retrain's own convention
+                tau_mine: self.mine_tau,
+                hardneg_tile: self.hardneg_tile,
+                max_hardneg: self.mine_max,
+            },
+            tx,
+            self.mine_cancel.clone(),
+        );
+    }
+
+    fn poll_mine(&mut self, toasts: &mut ToastManager) {
+        let mut done = false;
+        if let Some(rx) = &self.mine_rx {
+            for msg in rx.try_iter().take(64) {
+                match msg {
+                    MineMsg::Progress { done: d, total } => {
+                        self.mine_progress_done = d;
+                        self.mine_progress_total = total;
+                    }
+                    MineMsg::Found { n_so_far } => self.mine_found = n_so_far,
+                    MineMsg::Log(l) => self.mine_log.push(l),
+                    MineMsg::Error(e) => {
+                        self.mine_log.push(format!("ERROR: {e}"));
+                        toasts.error(format!("Mining failed: {e}"));
+                        done = true;
+                    }
+                    MineMsg::Done(s) => {
+                        self.mine_log.push(s);
+                        toasts.success(format!("Mining done — {} hard negative(s) found.", self.mine_found));
+                        done = true;
+                    }
+                }
+            }
+        }
+        if done {
+            self.mining = false;
+            self.mine_rx = None;
         }
     }
 
@@ -3775,6 +4535,12 @@ impl PipelineTab {
         let tu = self.hardneg_tile;
         let t = tu as i32;
         let mut buf = vec![0u8; (tu * tu * 4) as usize];
+        // Alpha-valid mask, same window — so `crop_feature`'s mask-aware
+        // pooling (already used for confirmed/rejected regions) excludes
+        // any transparent padding a stamp placed near the leaf's edge would
+        // otherwise silently blend into "Healthy" training signal, matching
+        // the same fix applied to both mining paths (hardneg_mining.rs).
+        let mut mask_buf = vec![0u8; (tu * tu) as usize];
         for row in 0..t {
             let sy = y + row;
             if sy < 0 || sy >= lh {
@@ -3788,6 +4554,9 @@ impl PipelineTab {
                 let si = ((sy * lw + sx) * 4) as usize;
                 let di = ((row * t + col) * 4) as usize;
                 buf[di..di + 4].copy_from_slice(&leaf.rgba[si..si + 4]);
+                if leaf.rgba[si + 3] > 10 {
+                    mask_buf[(row * t + col) as usize] = 255;
+                }
             }
         }
 
@@ -3813,10 +4582,14 @@ impl PipelineTab {
             toasts.error(format!("save crop: {e}"));
             return;
         }
+        let mask_fname = format!("{run}_hardneg_{leaf_idx}_{x}_{y}_mask.png");
+        if let Some(mask_img) = image::GrayImage::from_raw(tu, tu, mask_buf) {
+            let _ = mask_img.save(labels_dir.join(&mask_fname));
+        }
         let src = leaf.src.display().to_string();
         let line = format!(
-            "{{\"crop\":\"{}\",\"family\":\"{}\",\"source\":\"{}\",\"leaf_src\":\"{}\",\"ts\":{}}}\n",
-            fname, json_escape(&family), if is_reject { "reject" } else { "manual" },
+            "{{\"crop\":\"{}\",\"mask\":\"{}\",\"family\":\"{}\",\"source\":\"{}\",\"leaf_src\":\"{}\",\"ts\":{}}}\n",
+            fname, mask_fname, json_escape(&family), if is_reject { "reject" } else { "manual" },
             json_escape(&src), run,
         );
         use std::io::Write;
@@ -3942,8 +4715,12 @@ impl PipelineTab {
             n += 1;
         }
 
-        // per-leaf overlays (anomalies colour-coded by family)
+        // per-leaf overlays (anomalies colour-coded by family). The CSV loop above
+        // inherits rejection through `region_visible`; this one iterates LEAVES,
+        // so it needs the check itself or a rejected leaf would still ship an
+        // image (an empty one, which reads as "analysed, nothing found").
         for (li, leaf) in self.results.iter().enumerate() {
+            if self.rejected_leaves.contains(&li) { continue; }
             let (w, h) = (leaf.w as usize, leaf.h as usize);
             let mut px = leaf.rgba.clone();
             for (ri, r) in self.regions.iter().enumerate() {
@@ -3959,7 +4736,18 @@ impl PipelineTab {
         }
 
         match std::fs::write(dir.join("results.csv"), csv) {
-            Ok(_) => toasts.success(format!("Exported {n} anomalies + images → export/")),
+            // Name the excluded leaves explicitly. A silently smaller export is
+            // exactly the kind of thing that gets noticed months later, in the
+            // stats, with no way left to tell whether it was intentional.
+            Ok(_) => {
+                let skipped = self.rejected_leaves.len();
+                let note = if skipped > 0 {
+                    format!(" ({skipped} rejected leaves excluded)")
+                } else {
+                    String::new()
+                };
+                toasts.success(format!("Exported {n} anomalies + images → export/{note}"))
+            }
             Err(e) => toasts.error(format!("write results.csv: {e}")),
         }
     }
@@ -3985,10 +4773,33 @@ impl PipelineTab {
             (true, false) => std::cmp::Ordering::Greater,
             _ => b.members.len().cmp(&a.members.len()),
         });
-        for c in &clusters {
-            self.cluster_names.entry(c.id).or_insert_with(|| {
-                if c.id < 0 { "noise".to_string() } else { format!("Cluster {}", c.id) }
-            });
+        // Name any cluster id seen for the first time, resolving through the
+        // LOADED HEAD before falling back to a placeholder.
+        //
+        // This used to stamp "Cluster N" unconditionally, which silently renamed
+        // real classes and then wrote the placeholder to disk. The path: a class
+        // the head knows (say Skeletonizer) has no detections this run, so it
+        // never reaches `cluster_names` — but `cluster_picker_rows` still offers
+        // it, because that reads the head. The moment the user assigns the FIRST
+        // region to it, `build_clusters` runs, sees a brand-new cluster id, and
+        // inserts "Cluster N". Every display site reads `cluster_names` first,
+        // so the real name vanishes mid-session; worse, `persist_region` writes
+        // that same string into labels.jsonl, so every subsequent curation is
+        // saved under "Cluster N" instead of its family. `retrain` joins by
+        // NAME, so those rows then allocate a DUPLICATE class rather than
+        // training the intended one. Reported from the field exactly as "the
+        // suggestion was suddenly gone and replaced by cluster 4".
+        //
+        // `class_display_name` already implements the right order (runtime name,
+        // then head family, then placeholder); ids are collected first so it can
+        // take &mut self without borrowing `clusters`.
+        let new_ids: Vec<i32> = clusters.iter()
+            .map(|c| c.id)
+            .filter(|id| !self.cluster_names.contains_key(id))
+            .collect();
+        for id in new_ids {
+            let name = if id < 0 { "noise".to_string() } else { self.class_display_name(id) };
+            self.cluster_names.insert(id, name);
         }
         self.clusters = clusters;
     }
@@ -4333,6 +5144,35 @@ impl PipelineTab {
         let name = self.cluster_names.get(&label).cloned().unwrap_or_else(|| format!("Cluster {label}"));
         self.persist_region(idx, &name, false, toasts);
         toasts.success(format!("Painted \"{name}\""));
+    }
+
+    /// Rasterizes the closed polygon into a leaf-pixel stroke, then either
+    /// commits it immediately (a region is selected — use ITS family,
+    /// exactly like `finish_brush_stroke`'s existing touching-merge
+    /// behavior) or opens the family-choice popup (nothing selected —
+    /// there's no family to infer, ask).
+    fn finish_polygon(&mut self, leaf_idx: usize, click_pos: egui::Pos2, toasts: &mut ToastManager) {
+        let poly = std::mem::take(&mut self.poly_points);
+        let Some(([bx, by, bw, bh], mask)) = fill_polygon_mask(&poly) else { return };
+        let mut stroke: HashSet<(i32, i32)> = HashSet::new();
+        for yy in 0..bh {
+            for xx in 0..bw {
+                if mask[(yy * bw + xx) as usize] {
+                    stroke.insert((bx as i32 + xx as i32, by as i32 + yy as i32));
+                }
+            }
+        }
+        let sel = self.effective_selection();
+        if let Some(&i) = sel.first() {
+            let cid = self.labels[i];
+            let name = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
+            self.brush_stroke = stroke;
+            self.hardneg_label = name;
+            self.finish_brush_stroke(leaf_idx, toasts);
+        } else {
+            self.poly_pick_pos = click_pos;
+            self.poly_pending = Some(stroke);
+        }
     }
 
     /// Resolve a completed eraser stroke (accumulated leaf-pixel coords,
@@ -5064,6 +5904,8 @@ impl PipelineTab {
                         Pick::Meta => self.meta_path = Some(p),
                         Pick::Recon => self.recon_ckpt = Some(p),
                         Pick::Head => self.head_path = Some(p),
+                        Pick::MineHealthyDir => self.mine_healthy_dir = Some(p),
+                        Pick::BaseSet => self.retrain_base_set = Some(p),
                     }
                 }
                 self.pick_rx = None;
@@ -5075,7 +5917,7 @@ impl PipelineTab {
 // ── free helpers ────────────────────────────────────────────────────────────
 
 /// Minimal JSON string escaping for the curation label file (user-entered names).
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
@@ -5092,7 +5934,8 @@ fn spawn_dialog(which: Pick) -> mpsc::Receiver<Option<PathBuf>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let res = match which {
-            Pick::Source | Pick::Output => rfd::FileDialog::new().pick_folder(),
+            Pick::Source | Pick::Output | Pick::MineHealthyDir => rfd::FileDialog::new().pick_folder(),
+            Pick::BaseSet => rfd::FileDialog::new().add_filter("base set", &["bin"]).pick_file(),
             // Stored as the CONTAINING folder (worker.rs looks for `gen.mpk`
             // inside it), but a folder-picker dialog can't show files at all —
             // let the user click the .mpk file directly, then take its parent.
@@ -5452,197 +6295,7 @@ fn build_tile_mask_png(r: &AnomalyRegion, x0: u32, y0: u32, tile: u32) -> Option
     if any { image::GrayImage::from_raw(tile, tile, px) } else { None }
 }
 
-fn mask_connected_components(mask: &[bool], w: u32, h: u32) -> Vec<Vec<usize>> {
-    let (w, h) = (w as usize, h as usize);
-    let mut seen = vec![false; w * h];
-    let mut out = Vec::new();
-    for start in 0..w * h {
-        if !mask[start] || seen[start] {
-            continue;
-        }
-        let mut comp = Vec::new();
-        let mut stack = vec![start];
-        seen[start] = true;
-        while let Some(p) = stack.pop() {
-            comp.push(p);
-            let (px, py) = ((p % w) as i32, (p / w) as i32);
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    let (nx, ny) = (px + dx, py + dy);
-                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                        continue;
-                    }
-                    let np = ny as usize * w + nx as usize;
-                    if mask[np] && !seen[np] {
-                        seen[np] = true;
-                        stack.push(np);
-                    }
-                }
-            }
-        }
-        out.push(comp);
-    }
-    out
-}
-
-/// Multi-source 8-connected BFS reclaiming pixels that were carved out of a
-/// cut's mask but discarded outright before — seeded from every pixel
-/// already assigned to a piece (flat `w`-major indices into `pieces`),
-/// grown into any `original`-true, not-yet-owned pixel until every
-/// reclaimable one is claimed by whichever piece's frontier reaches it
-/// first. `permanent_gap(x,y)` (LOCAL bbox coordinates) marks pixels that
-/// must NEVER be reclaimed regardless — the thin residual band that keeps
-/// the resulting pieces non-adjacent so a cut can't quietly heal itself on
-/// the next `build_clusters` (see `KNIFE_KERF_KEEP`).
-fn reclaim_kerf(pieces: &mut [Vec<usize>], original: &[bool], w: u32, h: u32, permanent_gap: impl Fn(u32, u32) -> bool) {
-    let (wu, hu) = (w as usize, h as usize);
-    let mut owner: Vec<i32> = vec![-1; wu * hu];
-    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
-    for (pi, piece) in pieces.iter().enumerate() {
-        for &idx in piece {
-            owner[idx] = pi as i32;
-            queue.push_back(idx);
-        }
-    }
-    while let Some(p) = queue.pop_front() {
-        let owner_id = owner[p];
-        let (px, py) = ((p % wu) as i32, (p / wu) as i32);
-        for dy in -1i32..=1 {
-            for dx in -1i32..=1 {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                let (nx, ny) = (px + dx, py + dy);
-                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                    continue;
-                }
-                let np = ny as usize * wu + nx as usize;
-                if original[np] && owner[np] == -1 && !permanent_gap(nx as u32, ny as u32) {
-                    owner[np] = owner_id;
-                    pieces[owner_id as usize].push(np);
-                    queue.push_back(np);
-                }
-            }
-        }
-    }
-}
-
-/// 8-connected flood-fill from `(sx,sy)`, growing while each candidate
-/// pixel's full CIELAB (L,a,b) distance to the SEED pixel stays within
-/// `tolerance` — same traversal shape as `detect::connected_components`,
-/// just with a live similarity predicate instead of a static boolean mask.
-/// Capped at half the leaf's area so a too-loose tolerance on a fairly
-/// uniform leaf can't turn into an unbounded fill.
-fn wand_flood_fill(
-    l: &[f32], a: &[f32], b: &[f32], w: usize, h: usize, sx: i32, sy: i32, tolerance: f32,
-) -> HashSet<(i32, i32)> {
-    let mut out = HashSet::new();
-    if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
-        return out;
-    }
-    let seed_idx = sy as usize * w + sx as usize;
-    let (sl, sa, sb) = (l[seed_idx], a[seed_idx], b[seed_idx]);
-    let tol2 = tolerance * tolerance;
-    // Capped WAY below "half the leaf" — a loose tolerance on a fairly
-    // uniform leaf could otherwise grow into hundreds of thousands of
-    // pixels, and rendering (even as a texture) and hashing that many
-    // pixels every click is real, felt latency, not just a theoretical
-    // concern. A selection this large isn't a useful teaching example
-    // anyway (see calibration's own "precise examples" reasoning).
-    let cap = (w * h / 2).min(40_000);
-    let mut stack = vec![(sx, sy)];
-    out.insert((sx, sy));
-    while let Some((px, py)) = stack.pop() {
-        if out.len() >= cap {
-            break;
-        }
-        for dy in -1i32..=1 {
-            for dx in -1i32..=1 {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                let (nx, ny) = (px + dx, py + dy);
-                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                    continue;
-                }
-                if out.contains(&(nx, ny)) {
-                    continue;
-                }
-                let idx = ny as usize * w + nx as usize;
-                let (dl, da, db) = (l[idx] - sl, a[idx] - sa, b[idx] - sb);
-                if dl * dl + da * da + db * db <= tol2 {
-                    out.insert((nx, ny));
-                    stack.push((nx, ny));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Standard even-odd point-in-polygon test (ray casting). Used by the Lasso
-/// tool to decide which regions' bbox-centers fall inside a freehand outline.
-fn point_in_polygon(x: f32, y: f32, poly: &[(f32, f32)]) -> bool {
-    let mut inside = false;
-    let n = poly.len();
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = poly[i];
-        let (xj, yj) = poly[j];
-        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
-/// Shortest distance from `(px,py)` to any edge segment of `poly`, treated
-/// as closed (edge from the last point back to the first included). Used by
-/// the Knife tool's polycut kerf — a per-pixel "how close is this to the
-/// drawn loop's boundary" test, distinct from `point_in_polygon`'s
-/// inside/outside test.
-fn dist_to_polygon_boundary(px: f32, py: f32, poly: &[(f32, f32)]) -> f32 {
-    let n = poly.len();
-    if n < 2 {
-        return f32::INFINITY;
-    }
-    let mut best = f32::INFINITY;
-    for k in 0..n {
-        let (ax, ay) = poly[k];
-        let (bx, by) = poly[(k + 1) % n];
-        best = best.min(dist_point_to_segment(px, py, ax, ay, bx, by));
-    }
-    best
-}
-
-/// Shortest distance from `(px,py)` to any edge of an OPEN polyline `pts`
-/// (2+ points, consecutive segments — NO wraparound edge from the last
-/// point back to the first, unlike `dist_to_polygon_boundary`). Used by the
-/// knife/scissor line-cut's kerf so a bent multi-segment cut works exactly
-/// like a single straight one — a straight 2-point drag is just this
-/// function's smallest case.
-fn dist_to_polyline(px: f32, py: f32, pts: &[(f32, f32)]) -> f32 {
-    let mut best = f32::INFINITY;
-    for w in pts.windows(2) {
-        let (ax, ay) = w[0];
-        let (bx, by) = w[1];
-        best = best.min(dist_point_to_segment(px, py, ax, ay, bx, by));
-    }
-    best
-}
-
-fn dist_point_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
-    let dx = bx - ax;
-    let dy = by - ay;
-    let len2 = dx * dx + dy * dy;
-    if len2 < 1e-6 {
-        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
-    }
-    let t = (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
-    let (cx, cy) = (ax + t * dx, ay + t * dy);
-    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
-}
+// mask_connected_components, reclaim_kerf, wand_flood_fill, point_in_polygon,
+// dist_to_polygon_boundary, dist_to_polyline, dist_point_to_segment moved to
+// `crate::tabs::mask_tools` (shared with the Field Review tab) — see the
+// `use` near the top of this file.

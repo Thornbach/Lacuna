@@ -164,12 +164,12 @@ impl TilePickerTab {
         self.pump_thumbs(ctx);
         self.request_image();
 
-        // keyboard: arrows navigate, Ctrl/Cmd+Z undoes
+        // keyboard: arrows navigate, Ctrl+Z undoes
         let (prev, next, undo) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowLeft),
                 i.key_pressed(egui::Key::ArrowRight),
-                i.modifiers.command && i.key_pressed(egui::Key::Z),
+                i.modifiers.ctrl && i.key_pressed(egui::Key::Z),
             )
         });
         if prev {

@@ -171,7 +171,7 @@ pub fn preview_cutout(
         model_path:  yolo.to_path_buf(),
         image_paths: Vec::new(),
         output_dir:  tmp,
-        imgsz:       640,
+        imgsz:       1280, // see settings.rs::FieldReviewSettings::default
         conf:        0.25,
         alpha_lo,
         chroma_min,
@@ -231,6 +231,16 @@ fn run_segmentation(
 }
 
 // ── Single-image segmentation ───────────────────────────────────────────────
+
+/// A connected blob smaller than this fraction of an instance's LARGEST blob is
+/// prototype noise, not part of the leaf (see the speckle filter in
+/// `segment_one`). Relative rather than absolute so a genuinely split leaf keeps
+/// both halves: 15% is well below any real occlusion split worth keeping, and
+/// well above the confetti the prototype field scatters into neighbouring leaves.
+const SPECKLE_FRAC: f32 = 0.15;
+/// Absolute floor for the same test, so a tiny detection isn't judged against an
+/// even tinier fraction.
+const SPECKLE_MIN_PX: usize = 24;
 
 pub fn segment_one(model: &mut YoloModel, path: &Path, cfg: &SegConfig) -> Result<SegItem, String> {
     let img = image::open(path).map_err(|e| format!("open: {e}"))?.to_rgb8();
@@ -397,6 +407,48 @@ pub fn segment_one(model: &mut YoloModel, path: &Path, cfg: &SegConfig) -> Resul
             continue;
         }
 
+        // ── drop speckle: keep only components comparable to the main body ──
+        // An instance mask is sigmoid(coeffs · protos) CROPPED TO ITS BBOX. The
+        // prototype field is global, so it can read high well away from the leaf
+        // this detection is about — and in a crowded scene bounding boxes overlap
+        // heavily, so that stray response lands INSIDE a neighbouring leaf. The
+        // result is exactly what shows up on dense photos: confetti of one leaf's
+        // colour sprinkled across another, plus straight-edged rectangular
+        // patches where a high region was sliced off at the bbox border.
+        //
+        // The background-colour cleanup above cannot catch any of it: those
+        // pixels ARE leaf-coloured (they sit on a real leaf), and they never
+        // touch the crop border, so the flood fill never reaches them.
+        //
+        // A leaf is one blob. Anything much smaller than the main component is
+        // prototype noise. Small components are dropped RELATIVE to the largest
+        // rather than by absolute size, so a genuinely split leaf — one occluded
+        // into two substantial halves — keeps both, while confetti disappears.
+        {
+            use crate::tabs::mask_tools::mask_connected_components;
+            let bools: Vec<bool> = mask.iter().map(|&m| m == 1).collect();
+            let comps = mask_connected_components(&bools, bw, bh);
+            if comps.len() > 1 {
+                let biggest = comps.iter().map(|c| c.len()).max().unwrap_or(0);
+                let floor = ((biggest as f32 * SPECKLE_FRAC) as usize).max(SPECKLE_MIN_PX);
+                let mut dropped = 0usize;
+                for comp in &comps {
+                    if comp.len() >= floor {
+                        continue;
+                    }
+                    for &i in comp {
+                        mask[i] = 0;
+                        alpha[i] = 0;
+                        dropped += 1;
+                    }
+                }
+                leaf_px = leaf_px.saturating_sub(dropped as u32);
+                if leaf_px == 0 {
+                    continue;
+                }
+            }
+        }
+
         // write cutout (RGBA, soft anti-aliased alpha)
         let cutout_path = cfg.output_dir.join(format!("{stem}_leaf{:02}.png", instances.len()));
         let cutout = build_cutout(&img, bx, by, bw, bh, &alpha);
@@ -539,7 +591,7 @@ mod tests {
                 model_path: model,
                 image_paths: vec![image],
                 output_dir: out.clone(),
-                imgsz: 640,
+                imgsz: 1280, // see settings.rs::FieldReviewSettings::default for the measurement
                 conf: 0.25,
                 alpha_lo: 0.50,
                 chroma_min: 28,

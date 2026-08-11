@@ -19,7 +19,16 @@
 param(
     [string]$Version,
     [ValidateSet("gpu", "wgpu", "cpu")][string]$Variant = "gpu",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # coreset_bank.bin is 879 MB -- 72% of the zip -- and only the PatchCore
+    # detector uses it. A package built around the few-shot head does not need
+    # it (see all_paths_ok: EITHER the head OR bank+meta is sufficient to run),
+    # and dropping it takes the download from ~1.2 GB to ~340 MB.
+    [switch]$NoBank,
+    # Folder holding sam_encoder.onnx + sam_decoder.onnx. The Field Review SAM
+    # click tool always runs on ort and has no BURN port, so unlike every other
+    # model these ship as .onnx or not at all. Omit to leave SAM out.
+    [string]$SamDir
 )
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -65,13 +74,42 @@ $need = @(
     @{ src = "yolo_weights.safetensors"; dst = "models\yolo_weights.safetensors" },
     @{ src = "fewshot_head.json";        dst = "models\fewshot_head.json" },
     @{ src = "recon\gen.mpk";            dst = "models\recon\gen.mpk" },
-    @{ src = "coreset_bank.bin";         dst = "models\coreset_bank.bin" },
     @{ src = "detector_meta.json";       dst = "models\detector_meta.json" }
 )
+if (-not $NoBank) {
+    $need += @{ src = "coreset_bank.bin"; dst = "models\coreset_bank.bin" }
+}
 foreach ($f in $need) {
     $s = Join-Path $models $f.src
     if (Test-Path $s) { Copy-Item $s (Join-Path $stage $f.dst) }
     else { Write-Warning "missing weight (skipped): $($f.src)" }
+}
+if ($NoBank) {
+    Write-Host "Skipped coreset_bank.bin (-NoBank): few-shot head only, no PatchCore." -ForegroundColor Yellow
+}
+
+# 4b. SAM (optional). Goes in models\sam\ rather than models\ so it reads as one
+#     selectable unit -- the app asks for a FOLDER containing both files, not for
+#     the files themselves, and nothing auto-discovers it. Whoever runs the
+#     package still has to point Field Review at this folder once.
+if ($SamDir) {
+    $samStage = Join-Path $stage "models\sam"
+    New-Item -ItemType Directory -Force -Path $samStage | Out-Null
+    $samOk = $true
+    foreach ($f in "sam_encoder.onnx", "sam_decoder.onnx") {
+        $s = Join-Path $SamDir $f
+        if (Test-Path $s) { Copy-Item $s (Join-Path $samStage $f) }
+        else { Write-Warning "missing SAM model: $s"; $samOk = $false }
+    }
+    # A half-copied SAM folder fails at load time with a confusing error, so
+    # leave nothing rather than something broken.
+    if (-not $samOk) {
+        Remove-Item $samStage -Recurse -Force
+        Write-Warning "SAM incomplete -- models\sam\ removed from the package."
+    }
+    else {
+        Write-Host "Bundled SAM -> models\sam\ (point Field Review's 'SAM model folder' at it)." -ForegroundColor Green
+    }
 }
 
 # 5. Docs + licenses.

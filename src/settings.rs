@@ -460,7 +460,49 @@ impl Default for LeafSegSettings {
             last_model_path:    None,
             conf:  0.25,
             iou:   0.45,
-            imgsz: 640,
+            // 1280, not 640 — see FieldReviewSettings::default for the measurement.
+            imgsz: 1280,
+        }
+    }
+}
+
+// ── field review tab (real-photo instance-seg correction flywheel) ───────────
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FieldReviewSettings {
+    pub last_source_folder:  Option<PathBuf>,
+    pub last_dataset_root:   Option<PathBuf>,
+    pub last_model_path:     Option<PathBuf>,
+    pub conf:  f32,
+    pub imgsz: u32,
+}
+
+impl Default for FieldReviewSettings {
+    fn default() -> Self {
+        Self {
+            last_source_folder: None,
+            last_dataset_root:  None,
+            last_model_path:    None,
+            conf:  0.25,
+            // Inference resolution, and the single biggest lever on busy scenes:
+            // a crowded photo squeezed into 640px leaves each leaf only a few
+            // pixels across, and the detector simply cannot resolve them. This
+            // is not a quality/speed trade — recall improves at EVERY density.
+            //
+            // Measured against hand-labelled real scenes
+            // (1Help/eval → leaf_seg/eval_density.py, recall by leaves-per-scene):
+            // ```text
+            //   imgsz   1-9    10-19   20-39   40+    maskIoU@40+
+            //     640  0.850   0.615   0.628  0.267      0.815
+            //    1024  0.850   0.923   0.930  0.885      0.835
+            //    1280  0.900   0.923   0.977  0.962      0.851   <- best
+            //    1536  0.850   0.846   0.953  0.954      0.866
+            // ```
+            // 1536 is past the peak (sparse-scene recall falls away again), so
+            // this is a real optimum rather than "bigger is better". Costs ~4x
+            // the compute of 640 per image, which is worth it at 3.6x the recall
+            // on crowded scenes.
+            imgsz: 1280,
         }
     }
 }
@@ -700,6 +742,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub leaf_seg:     LeafSegSettings,
     #[serde(default)]
+    pub field_review: FieldReviewSettings,
+    #[serde(default)]
     pub pipeline:     PipelineSettings,
     #[serde(default)]
     pub train:        TrainSettings,
@@ -723,6 +767,7 @@ impl Default for AppSettings {
             recon_simple: ReconSimpleSettings::default(),
             radial_infer: RadialInferSettings::default(),
             leaf_seg:     LeafSegSettings::default(),
+            field_review: FieldReviewSettings::default(),
             pipeline:     PipelineSettings::default(),
             train:        TrainSettings::default(),
             tile_picker:  TilePickerSettings::default(),
