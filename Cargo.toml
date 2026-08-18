@@ -28,8 +28,11 @@ path = "src/main.rs"
 #   features. DINO/YOLO still default to BURN either way; these features only
 #   control whether THOSE TWO specifically can be switched to ort at runtime.
 [features]
-default  = ["cuda"]
+default  = ["wgpu-gpu", "ort-backend"]
 # ── BURN backends (DINOv3 + YOLO26 run pure-Rust; NO onnxruntime/cuDNN DLLs) ──
+# Portable by default. `cuda` stays available and is what you want on this
+# machine (`--no-default-features --features cuda,ort-backend`), but it must not
+# be what a stranger gets: it is NVIDIA-only and fails on every Mac.
 cuda     = ["dep:burn-cuda"]   # NVIDIA GPU via CUDA driver + nvrtc (no cuDNN)
 wgpu-gpu = ["burn/wgpu"]       # any GPU via Vulkan/DX12/Metal
 # ── Optional ONNX Runtime backend for DINO/YOLO specifically (SAM always uses
@@ -61,7 +64,12 @@ egui-phosphor = "0.7"   # icon font (matches egui 0.29) for the nav rail + butto
 # Morphology tab. It pins image 0.24 internally; we only cross the boundary with
 # raw RGBA bytes + scalars (see leaf_complex_rust::analyze), so the version differs
 # harmlessly from our image 0.25.
-leaf_complex_rust_lib = { path = "../ShapeComplexity", package = "leaf_complex_rust" }
+# Vendored, not a sibling path: `../ShapeComplexity` meant nobody could clone
+# this repo and build it — not a collaborator, not CI, not a reviewer. Kept as a
+# copy rather than a git submodule because the upstream repo has uncommitted work
+# (including src/gui_api.rs, which this crate needs), so a submodule would pin a
+# commit that does not compile. Re-sync with scripts/sync_vendor.ps1.
+leaf_complex_rust_lib = { path = "vendor/ShapeComplexity", package = "leaf_complex_rust" }
 # ONNX Runtime — always compiled in now. DINOv3/YOLO26 still default to the
 # BURN reimplementations (see `ort-backend` above for switching those two to
 # ort); Field Review's interactive SAM click tool has no BURN port and uses

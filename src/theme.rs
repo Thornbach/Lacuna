@@ -100,8 +100,27 @@ impl ThemeDesc {
                 active,
                 open,
             },
-            window_shadow: Shadow::NONE,
-            popup_shadow:  Shadow::NONE,
+            // Shadows were switched off on every theme, which removed the only
+            // depth cue in the app — panels, popups, menus and dialogs all sat on
+            // one flat plane with nothing indicating what floated above what.
+            //
+            // Tuned per polarity rather than shared: the same alpha that reads as
+            // a soft shadow on a dark ground reads as a dirty smudge on a light
+            // one, so light themes get roughly a third of the opacity.
+            // NOTE: these fields are f32 in egui 0.29 (they become integers in
+            // 0.31+, which is a compile error to watch for on any upgrade).
+            window_shadow: Shadow {
+                offset: egui::vec2(0.0, 4.0),
+                blur:   16.0,
+                spread: 0.0,
+                color:  Color32::from_black_alpha(if self.dark { 110 } else { 38 }),
+            },
+            popup_shadow: Shadow {
+                offset: egui::vec2(0.0, 2.0),
+                blur:   10.0,
+                spread: 0.0,
+                color:  Color32::from_black_alpha(if self.dark { 90 } else { 30 }),
+            },
             ..base
         }
     }
@@ -124,7 +143,94 @@ pub fn all_themes() -> Vec<ThemeDesc> {
         synthwave(),
         rose_pine(),
         everforest(),
+        herbarium(),
+        greenhouse(),
+        sage_dark(),
+        paper(),
     ]
+}
+
+// ── added for v0.5 ──────────────────────────────────────────────────────────
+// Three light options and one more dark green. The catalogue was 11 dark to 2
+// light, and the light pair were both cold blue-greys — for a tool whose subject
+// is leaves, and which is used beside a window in daylight as often as in a dark
+// office, that is a thin choice. Greens here are desaturated on purpose: an
+// accent that competes with the leaf on the canvas is a bad accent.
+
+/// Warm paper and ink, like a specimen sheet. Light.
+fn herbarium() -> ThemeDesc {
+    ThemeDesc {
+        name:     "Herbarium",
+        dark:     false,
+        bg0:      rgb!(246, 244, 238),
+        bg1:      rgb!(238, 235, 227),
+        bg2:      rgb!(225, 221, 210),
+        bg3:      rgb!(210, 205, 192),
+        accent:   rgb!(58, 106, 74),
+        accent2:  rgb!(76, 132, 94),
+        text:     rgb!(32, 34, 30),
+        text_dim: rgb!(104, 108, 98),
+        border:   rgb!(198, 194, 182),
+        warn:     rgb!(168, 118, 20),
+        error:    rgb!(170, 56, 44),
+    }
+}
+
+/// Cool, bright, slightly green-tinted white. Light.
+fn greenhouse() -> ThemeDesc {
+    ThemeDesc {
+        name:     "Greenhouse",
+        dark:     false,
+        bg0:      rgb!(243, 248, 243),
+        bg1:      rgb!(234, 241, 234),
+        bg2:      rgb!(219, 229, 219),
+        bg3:      rgb!(203, 215, 203),
+        accent:   rgb!(42, 122, 92),
+        accent2:  rgb!(56, 148, 112),
+        text:     rgb!(24, 32, 27),
+        text_dim: rgb!(96, 110, 100),
+        border:   rgb!(192, 206, 193),
+        warn:     rgb!(160, 116, 24),
+        error:    rgb!(176, 58, 46),
+    }
+}
+
+/// Muted green-grey, low contrast, for long sessions. Dark.
+fn sage_dark() -> ThemeDesc {
+    ThemeDesc {
+        name:     "Sage",
+        dark:     true,
+        bg0:      rgb!(24, 30, 27),
+        bg1:      rgb!(30, 38, 34),
+        bg2:      rgb!(41, 51, 45),
+        bg3:      rgb!(52, 64, 57),
+        accent:   rgb!(126, 186, 142),
+        accent2:  rgb!(150, 206, 166),
+        text:     rgb!(220, 228, 222),
+        text_dim: rgb!(140, 152, 144),
+        border:   rgb!(58, 70, 63),
+        warn:     rgb!(220, 176, 96),
+        error:    rgb!(224, 118, 104),
+    }
+}
+
+/// Near-white and neutral, maximum contrast for daylight. Light.
+fn paper() -> ThemeDesc {
+    ThemeDesc {
+        name:     "Paper",
+        dark:     false,
+        bg0:      rgb!(252, 252, 251),
+        bg1:      rgb!(245, 245, 244),
+        bg2:      rgb!(232, 232, 230),
+        bg3:      rgb!(216, 216, 213),
+        accent:   rgb!(46, 98, 68),
+        accent2:  rgb!(62, 126, 90),
+        text:     rgb!(20, 20, 19),
+        text_dim: rgb!(98, 100, 96),
+        border:   rgb!(206, 206, 203),
+        warn:     rgb!(150, 108, 16),
+        error:    rgb!(166, 48, 38),
+    }
 }
 
 pub fn theme_names() -> Vec<&'static str> {
@@ -134,6 +240,11 @@ pub fn theme_names() -> Vec<&'static str> {
 pub fn apply(ctx: &egui::Context, name: &str) {
     if let Some(t) = all_themes().into_iter().find(|t| t.name == name) {
         ctx.set_visuals(t.to_visuals());
+        // Publish the accent so `ui_kit::ACCENT()` follows the theme. Without
+        // this the primary buttons and the wordmark stayed leaf green in all 13
+        // themes — including the light ones, where that green sat at ~1.9:1
+        // against its own near-black label.
+        crate::ui_kit::set_theme_colors(t.accent, t.text_dim);
     }
 }
 

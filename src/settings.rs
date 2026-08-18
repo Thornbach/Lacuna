@@ -511,6 +511,12 @@ impl Default for FieldReviewSettings {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PipelineSettings {
+    /// Custom keyboard bindings as `action id -> key name` (see
+    /// `pipeline::shortcuts::Keymap`). Only DIFFERENCES from the defaults are
+    /// stored, so changing a shipped default still reaches users who never
+    /// rebound it. `serde(default)` so older settings files load unchanged.
+    #[serde(default)]
+    pub shortcuts:          std::collections::HashMap<String, String>,
     pub last_source_folder: Option<PathBuf>,
     pub last_output_folder: Option<PathBuf>,
     pub yolo_model_path:    Option<PathBuf>,
@@ -552,6 +558,55 @@ pub struct PipelineSettings {
     /// embeddings (logged) if there isn't enough curated data yet.
     #[serde(default)]
     pub domain_projection: bool,
+    // ── detection parameters that used to reset on every launch ──────────────
+    // These are exposed in Settings → Pipeline and change the numbers that end up
+    // in results.csv, but none of them were written by `save_settings`. The same
+    // button on the same folder therefore produced different measurements across
+    // sessions with nothing on screen indicating it — a reproducibility defect
+    // rather than a UX one. `serde(default = …)` mirrors PipelineTab's own
+    // constructor values so existing settings files load unchanged.
+    /// YOLO segmentation confidence.
+    #[serde(default = "default_seg_conf")]
+    pub conf:               f32,
+    /// Cut-out alpha feather start (0.50 = crisp at the mask boundary).
+    #[serde(default)]
+    pub seg_alpha_lo:       f32,
+    /// Boundary pixels below this chroma are dropped as background.
+    /// `i32` to match `PipelineTab::seg_chroma_min` and `SegConfig::chroma_min`.
+    #[serde(default)]
+    pub seg_chroma_min:     i32,
+    /// Flag interior holes on geometry alone.
+    #[serde(default = "default_true")]
+    pub detect_holes:       bool,
+    /// Minimum hole area in leaf pixels.
+    #[serde(default = "default_min_hole_area")]
+    pub min_hole_area:      u32,
+    /// Drop "Holes" detections that hug the leaf outline instead of sitting inside it.
+    #[serde(default)]
+    pub filter_margin_holes: bool,
+    /// How deep a "Holes" region must reach to count (px).
+    #[serde(default = "default_hole_margin_px")]
+    pub hole_margin_px:     u32,
+    /// Write one PNG per anomaly on export.
+    #[serde(default)]
+    pub export_crops:       bool,
+    /// Write one full-size overlay PNG per leaf on export (the expensive one).
+    #[serde(default = "default_true")]
+    pub export_overlays:    bool,
+    /// results.csv shape: false = one row per anomaly, true = one row per leaf.
+    ///
+    /// `default = "default_export_wide"`, not a plain `#[serde(default)]`: bool's
+    /// Default is false, so every settings file written before this field existed
+    /// would silently come back as Long despite Wide being the intended default.
+    #[serde(default = "default_true")]
+    pub export_wide:        bool,
+    /// Curate gallery shows only the current leaf's regions.
+    #[serde(default = "default_true")]
+    pub filter_leaf_only:   bool,
+    /// Per-family colour overrides, amily id -> RGB.
+    #[serde(default)]
+    pub family_colors:      std::collections::HashMap<String, [u8; 3]>,
+
     /// Few-shot defect-probability threshold τ (hysteresis SEED).
     #[serde(default = "default_head_tau")]
     pub head_tau:           f32,
@@ -601,6 +656,11 @@ pub struct PipelineSettings {
 
 fn default_margin_erode() -> u32 { 6 }
 fn default_true() -> bool { true }
+// Mirror PipelineTab::new()'s values so a settings file written before these
+// became persistent loads with exactly the behaviour it had before.
+fn default_seg_conf() -> f32 { 0.25 }
+fn default_min_hole_area() -> u32 { 16 }
+fn default_hole_margin_px() -> u32 { 16 }
 fn default_head_tau() -> f32 { 0.85 }
 fn default_head_grow() -> f32 { 0.7 }
 fn default_cluster_eps() -> f32 { 1.5 }
@@ -610,6 +670,7 @@ fn default_adaptive_threshold() -> f32 { 8.0 }
 impl Default for PipelineSettings {
     fn default() -> Self {
         Self {
+            shortcuts:          std::collections::HashMap::new(),
             last_source_folder: None,
             last_output_folder: None,
             yolo_model_path:    None,
@@ -627,6 +688,18 @@ impl Default for PipelineSettings {
             use_patchcore:      false,
             unsupervised_families: false,
             domain_projection: false,
+            conf:               0.25,
+            seg_alpha_lo:       0.0,
+            seg_chroma_min:     0,
+            detect_holes:       true,
+            min_hole_area:      16,
+            filter_margin_holes: false,
+            hole_margin_px:     16,
+            export_crops:       false,
+            export_overlays:    true,
+            export_wide:        true,
+            filter_leaf_only:   true,
+            family_colors:      std::collections::HashMap::new(),
             head_tau:           0.85,
             head_grow:          0.7,
             cluster_eps:        1.5,

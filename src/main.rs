@@ -2,7 +2,9 @@
 
 mod app;
 mod dino_burn;
+mod dino_bench;
 mod dino_validate;
+mod paths;
 mod recon_bench;
 mod recon_validate;
 mod settings;
@@ -25,7 +27,15 @@ fn main() -> eframe::Result<()> {
         smoke::run(&folder);
         return Ok(());
     }
-    // headless BURN DINOv3 vs ONNX validation: `--dino-burn-validate [ref.st] [weights.st]`
+    // headless DINO throughput bench: `--dino-bench [weights] [res] [n]`
+    if let Some(pos) = args.iter().position(|a| a == "--dino-bench") {
+        let model = args.get(pos + 1).cloned()
+            .unwrap_or_else(|| r"e:\PhD_TobiMu\02_code\FoliarToolbox\models\dino_weights.safetensors".into());
+        let res: u32 = args.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let n: usize = args.get(pos + 3).and_then(|s| s.parse().ok()).unwrap_or(512);
+        dino_bench::run(&model, res, n);
+        return Ok(());
+    }    // headless BURN DINOv3 vs ONNX validation: `--dino-burn-validate [ref.st] [weights.st]`
     if let Some(pos) = args.iter().position(|a| a == "--dino-burn-validate") {
         let ref_path = args.get(pos + 1).cloned()
             .unwrap_or_else(|| "port/dino_ref.safetensors".into());

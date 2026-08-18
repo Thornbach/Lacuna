@@ -1,2 +1,2 @@
 mod toast;
-pub use toast::ToastManager;
+pub use toast::{ToastKind, ToastManager};

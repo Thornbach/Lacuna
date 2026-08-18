@@ -155,7 +155,12 @@ impl LeafSegTab {
             std::thread::spawn(move || {
                 let _ = tx.send(
                     rfd::FileDialog::new()
-                        .add_filter("ONNX", &["onnx"])
+                        // BURN (the default backend) loads yolo_weights.safetensors,
+                        // resolved from this path's folder — so the weights file is
+                        // the natural thing to select. Filtering to .onnx alone hid
+                        // every model in a shipped package, which contains no .onnx.
+                        .add_filter("model weights", &["safetensors", "onnx"])
+                        .add_filter("all files", &["*"])
                         .pick_file(),
                 );
             });

@@ -1,6 +1,14 @@
 # ── Rust build artifacts (root crate + nested scratch crates in port/*_test) ──
 # NB: no leading slash → matches target/ at any depth, not just the repo root.
 target/
+# Separate target dir for the portable wgpu build, so it can be built while a
+# CUDA-built lacuna.exe from target/ is still running (Windows locks a running
+# binary, and cargo fails at the final link with "Access is denied").
+target-wgpu/
+# Same idea for the CPU/ort build. `target/` above has no leading slash but it
+# matches the literal name only — `target-cpu` is a different path and was NOT
+# covered, so the whole build tree showed up as untracked.
+target-cpu/
 **/*.rs.bk
 
 # ── Editor / agent state ──
@@ -21,6 +29,11 @@ target/
 *.faiss
 coreset_bank.bin
 bank.bin
+# The retrain base set — ~1.2 GB of exported DINO feature rows. Auto-loaded from
+# models/ at startup (see PipelineTab::default_base_set), so it MUST live there,
+# but it is far past what git should carry. Rebuild with
+# 1Help/eval/export_base_set.py.
+base_set*.bin
 
 # ── Generated outputs ─────────────────────────────────────────────────────────
 smoke_out/
@@ -33,6 +46,11 @@ dist/
 # NB: models/ IS tracked, but the big weights in it are excluded by the extension
 # rules above — so small configs (detector_meta.json, fewshot_head.json, …) stay
 # versioned while the multi-hundred-MB *.onnx/*.safetensors/*.mpk do not.
+
+# ── Working notes ──
+# Session handover for continuing the project in a new chat. Local scratch, not
+# part of the project's documentation — README.md is what ships.
+HANDOVER.md
 
 # ── OS cruft ──
 Thumbs.db

@@ -1,0 +1,51 @@
+[package]
+name = "leaf_complex_rust"
+version = "2.0.0"
+edition = "2021"
+authors = ["Tobias Müller <tobimu@proton.me"]
+description = "A tool for analyzing leaf edge and margin complexity from PNG images"
+readme = "README.md"
+license = "MIT"
+
+# Add lib target for R package to use
+[lib]
+name = "leaf_complex_rust_lib"
+crate-type = ["rlib", "cdylib"] 
+
+[[bin]]
+name = "leaf_complex_rust_cli"
+path = "src/main.rs"
+
+[dependencies]
+# Core image processing
+image = "0.24.7"
+imageproc = "0.23.0"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8.0"
+
+# CLI parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# CSV output
+csv = "1.2"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Optional: parallelism for batch processing
+rayon = "1.8"
+
+# Path finding and geometry
+bresenham = "0.1.1"
+nalgebra = "0.32.3"
+
+# Spectral Entropy
+rustfft = "6.1.0"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1

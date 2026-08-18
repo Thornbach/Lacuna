@@ -224,7 +224,7 @@ impl MorphologyTab {
             }
         });
         if !self.status.is_empty() {
-            ui.label(RichText::new(&self.status).small().color(ui_kit::ACCENT));
+            ui.label(RichText::new(&self.status).small().color(ui_kit::ACCENT()));
         }
 
         ui_kit::section_header(ui, "Leaves");
@@ -248,7 +248,7 @@ impl MorphologyTab {
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_default();
                     let txt = if done { format!("● {name}") } else { name };
-                    let col = if done { ui_kit::ACCENT } else { Color32::GRAY };
+                    let col = if done { ui_kit::ACCENT() } else { Color32::GRAY };
                     if ui
                         .selectable_label(self.cur == i, RichText::new(txt).small().color(col))
                         .clicked()

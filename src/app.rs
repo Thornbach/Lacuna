@@ -66,6 +66,25 @@ pub struct LacunaApp {
 #[derive(Clone, Copy)]
 enum DefaultField { Yolo, Dino, Bank, Meta, Head, Recon, Healthy }
 
+/// The screen's own name. Free function so both the menus and the title readout
+/// use one source — they had drifted before ("Recon Train" in one, "ReconSimple"
+/// in the enum, "Train Detector" naming a tab that does two unrelated jobs).
+fn tab_title(t: Tab) -> &'static str {
+    match t {
+        Tab::LeafSeg     => "Leaf Segmentation",
+        Tab::FieldReview => "Field Review",
+        Tab::Pipeline    => "Analyse",
+        Tab::Train       => "Train Detector",
+        Tab::Morphology  => "Morphology",
+        Tab::TilePicker  => "Tile Picker",
+        Tab::Eroder      => "Eroder",
+        Tab::Sorter      => "Sorter",
+        Tab::ReconSimple => "Recon Train",
+        Tab::ReconInfer  => "Recon Infer",
+        Tab::Settings    => "Settings",
+    }
+}
+
 impl LacunaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut settings: AppSettings = cc.storage
@@ -84,7 +103,12 @@ impl LacunaApp {
 
         crate::theme::apply(&cc.egui_ctx, &settings.theme_name);
         ui_kit::apply_style(&cc.egui_ctx);
-        cc.egui_ctx.set_pixels_per_point(settings.ui_scale.clamp(0.7, 2.0));
+        // set_zoom_factor, NOT set_pixels_per_point: the latter internally does
+        // `set_zoom_factor(v / native_pixels_per_point)`, so passing the user's
+        // intended zoom DIVIDES it by the monitor's scaling. On a Windows display
+        // at 150%, asking for 1.2 produced 0.8 — the UI shrank when the user asked
+        // for bigger. It happened to be correct only at 100% scaling.
+        cc.egui_ctx.set_zoom_factor(settings.ui_scale.clamp(0.7, 2.0));
 
         let mut eroder        = EroderTab::new();
         let mut sorter        = SorterTab::new();
@@ -132,19 +156,7 @@ impl LacunaApp {
     }
 
     fn active_title(&self) -> &'static str {
-        match self.active_tab {
-            Tab::LeafSeg => "Leaf Segmentation",
-            Tab::FieldReview => "Field Review",
-            Tab::Pipeline => "Integrated Pipeline",
-            Tab::Train => "Train Detector",
-            Tab::Morphology => "Morphology",
-            Tab::TilePicker => "Tile Picker",
-            Tab::Eroder => "Eroder",
-            Tab::Sorter => "Sorter",
-            Tab::ReconSimple => "Recon Train",
-            Tab::ReconInfer => "Recon Infer",
-            Tab::Settings => "Settings",
-        }
+        tab_title(self.active_tab)
     }
 
     fn any_busy(&self) -> bool {
@@ -174,6 +186,37 @@ impl LacunaApp {
         }
     }
 
+    /// A grouped destination menu. The button reads as selected when the active
+    /// tab lives inside it, so the bar still answers "where am I" at a glance —
+    /// otherwise collapsing tabs into menus would hide the current location,
+    /// which is worse than the crowding it fixes.
+    ///
+    /// Each entry carries a plain-language description rather than only the
+    /// screen's internal name: "Recon Infer" tells a student nothing, whereas
+    /// "Reconstruct lost area in bulk" tells them whether they need it.
+    fn tab_menu(ui: &mut Ui, tab: &mut Tab, label: &str, entries: &[(Tab, &str)]) {
+        let holds_active = entries.iter().any(|(t, _)| *t == *tab);
+        let title = if holds_active {
+            RichText::new(label).strong().color(ui_kit::ACCENT())
+        } else {
+            RichText::new(label)
+        };
+        ui.menu_button(title, |ui| {
+            ui.set_min_width(230.0);
+            for (t, desc) in entries {
+                let selected = *tab == *t;
+                let resp = ui.selectable_label(
+                    selected,
+                    RichText::new(format!("{}\n{}", tab_title(*t), desc)),
+                );
+                if resp.clicked() {
+                    *tab = *t;
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
     // ── Slim context bar (active screen + global busy indicator) ────────────────
 
     fn show_top_bar(&mut self, ctx: &Context) {
@@ -184,22 +227,37 @@ impl LacunaApp {
                     RichText::new(format!("{}  Lacuna", icon::LEAF))
                         .size(16.0)
                         .strong()
-                        .color(ui_kit::ACCENT),
+                        .color(ui_kit::ACCENT()),
                 );
                 ui.separator();
 
-                Self::tab_button(ui, &mut self.active_tab, Tab::Pipeline, "Pipeline");
-                Self::tab_button(ui, &mut self.active_tab, Tab::LeafSeg, "Leaf Seg");
-                Self::tab_button(ui, &mut self.active_tab, Tab::Morphology, "Morphology");
-                Self::tab_button(ui, &mut self.active_tab, Tab::ReconInfer, "Recon Infer");
-                ui.separator();
-                Self::tab_button(ui, &mut self.active_tab, Tab::FieldReview, "Field Review");
-                Self::tab_button(ui, &mut self.active_tab, Tab::ReconSimple, "Recon Train");
-                Self::tab_button(ui, &mut self.active_tab, Tab::Train, "Train Detector");
-                ui.separator();
-                Self::tab_button(ui, &mut self.active_tab, Tab::TilePicker, "Tile Picker");
-                Self::tab_button(ui, &mut self.active_tab, Tab::Eroder, "Eroder");
-                Self::tab_button(ui, &mut self.active_tab, Tab::Sorter, "Sorter");
+                // Eleven flat destinations, grouped by subsystem ("things that use
+                // a model" / "make a model" / "make data"), was a developer's
+                // taxonomy — and the single thing students named when asked what
+                // was wrong. A plant scientist's model is: get leaves out of
+                // photos, judge the damage, get numbers out.
+                //
+                // So: ONE always-visible primary destination, and three menus for
+                // the rest. Eleven choices become four, and Hick's law is paid on
+                // four rather than eleven every time you look at the bar. Nothing
+                // is removed; the tab modules are untouched.
+                Self::tab_button(ui, &mut self.active_tab, Tab::Pipeline, "Analyse");
+
+                Self::tab_menu(ui, &mut self.active_tab, "Prepare", &[
+                    (Tab::LeafSeg,     "Cut leaves out of photos"),
+                    (Tab::FieldReview, "Correct the leaf outlines"),
+                    (Tab::TilePicker,  "Collect healthy example tiles"),
+                    (Tab::Sorter,      "Sort photos into folders"),
+                ]);
+                Self::tab_menu(ui, &mut self.active_tab, "Train", &[
+                    (Tab::Train,       "Anomaly classifier"),
+                    (Tab::ReconSimple, "Leaf reconstruction"),
+                    (Tab::Eroder,      "Make synthetic damaged leaves"),
+                ]);
+                Self::tab_menu(ui, &mut self.active_tab, "Measure", &[
+                    (Tab::Morphology,  "Shape complexity (EC / MC)"),
+                    (Tab::ReconInfer,  "Reconstruct lost area in bulk"),
+                ]);
 
                 // right-aligned: current tab title, busy indicator, Settings —
                 // Settings is a single destination, not a dropdown.
@@ -265,11 +323,22 @@ impl LacunaApp {
                             ui.end_row();
 
                             ui.label("UI scale");
-                            if ui
-                                .add(egui::Slider::new(&mut self.settings.ui_scale, 0.8..=1.6).fixed_decimals(2))
-                                .changed()
-                            {
-                                ctx.set_pixels_per_point(self.settings.ui_scale);
+                            // Apply on RELEASE, not on every frame of the drag.
+                            // Rescaling mid-drag moves the slider out from under
+                            // the pointer — the widget you are dragging changes
+                            // size and position as you drag it, which makes the
+                            // control fight back and feel laggy. Keyboard/click
+                            // changes still apply immediately, since those are a
+                            // single discrete change with nothing to chase.
+                            let r = ui.add(
+                                egui::Slider::new(&mut self.settings.ui_scale, 0.8..=1.6)
+                                    .fixed_decimals(2),
+                            );
+                            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                                // See the matching call in `new()` — zoom factor,
+                                // not pixels-per-point, or this fights the
+                                // monitor's own DPI scaling.
+                                ctx.set_zoom_factor(self.settings.ui_scale);
                             }
                             ui.end_row();
                         });
@@ -320,8 +389,8 @@ impl LacunaApp {
                 self.default_pick = Some((field, spawn_default_dialog(field)));
             }
             match &cur {
-                Some(s) => { ui.label(RichText::new(s).small().color(ui_kit::MUTED)); }
-                None => { ui.label(RichText::new("not set").small().color(ui_kit::MUTED)); }
+                Some(s) => { ui.label(RichText::new(s).small().color(ui_kit::MUTED())); }
+                None => { ui.label(RichText::new("not set").small().color(ui_kit::MUTED())); }
             }
             if cur.is_some() && ui.small_button("clear").clicked() {
                 set_default(&mut self.settings.defaults, field, None);
@@ -367,7 +436,16 @@ impl LacunaApp {
                     }
                     Tab::LeafSeg => { ui.label(RichText::new("Leaf Segmentation").small()); }
                     Tab::FieldReview => { ui.label(RichText::new("Field Review").small()); }
-                    Tab::Pipeline => { ui.label(RichText::new("Integrated Pipeline").small()); }
+                    // Was the literal string "Integrated Pipeline" — a permanently
+                    // reserved 24px strip repeating the title already shown in the
+                    // top bar. On the app's densest screen that is the least
+                    // affordable place to spend a row saying nothing.
+                    Tab::Pipeline => {
+                        for (i, s) in self.pipeline.status_line().iter().enumerate() {
+                            if i > 0 { ui.separator(); }
+                            ui.label(RichText::new(s).small().color(ui_kit::MUTED()));
+                        }
+                    }
                     Tab::Train => { ui.label(RichText::new("Train Detector").small()); }
                     Tab::Morphology => { ui.label(RichText::new("Morphology").small()); }
                     Tab::TilePicker => { ui.label(RichText::new("Tile Picker").small()); }
@@ -450,9 +528,13 @@ fn spawn_default_dialog(field: DefaultField) -> mpsc::Receiver<Option<PathBuf>> 
                 .pick_file()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf())),
             DefaultField::Healthy => rfd::FileDialog::new().pick_folder(),
-            DefaultField::Yolo | DefaultField::Dino => {
-                rfd::FileDialog::new().add_filter("ONNX", &["onnx"]).pick_file()
-            }
+            // .safetensors FIRST: the BURN backends are the default and the
+            // shipped packages contain only weights, no .onnx anchors — an
+            // ONNX-only filter made every bundled model invisible in the picker.
+            DefaultField::Yolo | DefaultField::Dino => rfd::FileDialog::new()
+                .add_filter("model weights", &["safetensors", "onnx"])
+                .add_filter("all files", &["*"])
+                .pick_file(),
             DefaultField::Bank => rfd::FileDialog::new().add_filter("bank", &["bin"]).pick_file(),
             DefaultField::Meta | DefaultField::Head => {
                 rfd::FileDialog::new().add_filter("json", &["json"]).pick_file()

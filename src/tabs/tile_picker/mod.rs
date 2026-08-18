@@ -264,7 +264,7 @@ impl TilePickerTab {
         ui_kit::section_header(ui, "Session");
         ui.label(RichText::new(format!("Tiles stamped: {}", self.total_stamped)).small());
         if !self.status.is_empty() {
-            ui.label(RichText::new(&self.status).small().color(ui_kit::ACCENT));
+            ui.label(RichText::new(&self.status).small().color(ui_kit::ACCENT()));
         }
 
         ui_kit::section_header(ui, "Help");
@@ -400,7 +400,7 @@ impl TilePickerTab {
 
         if selected {
             // big, unmistakable highlight for the leaf you're on
-            painter.rect_stroke(rect.expand(1.5), 6.0, Stroke::new(3.0, ui_kit::ACCENT));
+            painter.rect_stroke(rect.expand(1.5), 6.0, Stroke::new(3.0, ui_kit::ACCENT()));
         } else if stamped {
             painter.rect_stroke(rect, 4.0, Stroke::new(1.5, STAMP_COL));
         }
@@ -475,7 +475,7 @@ impl TilePickerTab {
                 img_rect.min + Vec2::new(tlx * scale, tly * scale),
                 Vec2::new(t * scale, t * scale),
             );
-            painter.rect_stroke(r, 0.0, Stroke::new(2.0, ui_kit::ACCENT));
+            painter.rect_stroke(r, 0.0, Stroke::new(2.0, ui_kit::ACCENT()));
         }
 
         // ── loupe ──
@@ -574,7 +574,7 @@ impl TilePickerTab {
             if let Some([tlx, tly]) = sq_tl {
                 let a = to_loupe(tlx, tly);
                 let b = to_loupe(tlx + t, tly + t);
-                lp.rect_stroke(Rect::from_two_pos(a, b), 0.0, Stroke::new(1.5, ui_kit::ACCENT));
+                lp.rect_stroke(Rect::from_two_pos(a, b), 0.0, Stroke::new(1.5, ui_kit::ACCENT()));
             }
             let c = lrect.center();
             lp.line_segment(

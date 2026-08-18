@@ -16,6 +16,7 @@ pub mod tiling;
 pub mod projection;
 pub mod worker;
 pub mod hardneg_mining;
+pub mod shortcuts;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -43,20 +44,173 @@ use crate::widgets::ToastManager;
 use hardneg_mining::{
     spawn_mine, spawn_mine_unmarked, LeafMineInput, MineConfig, MineMsg, MineUnmarkedConfig,
 };
-use worker::{spawn_pipeline, AnomalyRegion, PipeConfig, PipeMsg, PipelineLeaf};
+use worker::{spawn_pipeline, spawn_rank, AnomalyRegion, PipeConfig, PipeMsg, PipelineLeaf,
+             RankLeaf, RankMsg, RankRegion};
 
-const CLUSTER_PALETTE: [[u8; 3]; 10] = [
-    [230, 80, 80], [80, 160, 230], [120, 200, 110], [230, 170, 60], [170, 110, 210],
-    [70, 200, 190], [230, 110, 170], [150, 190, 70], [110, 130, 220], [220, 140, 90],
+/// Okabe–Ito, the de-facto standard qualitative palette for scientific figures:
+/// eight hues chosen to stay distinguishable under protanopia, deuteranopia and
+/// tritanopia.
+///
+/// The previous palette had red at index 0 and green at index 2 — the canonical
+/// red/green confusion, and the two colours a run produces FIRST. It also had
+/// two blues (1/8) and two greens (2/7) that were close even for normal vision.
+/// Roughly 8% of men have a colour-vision deficiency, and class colour is the
+/// primary information channel of this entire product.
+///
+/// Bonus, and not a small one for this user: these are the same values
+/// conventionally used in published figures, so on-screen classes and the paper
+/// end up the same colour.
+const CLUSTER_PALETTE: [[u8; 3]; 8] = [
+    [230, 159,   0], // orange
+    [ 86, 180, 233], // sky blue
+    [  0, 158, 115], // bluish green
+    [240, 228,  66], // yellow
+    [  0, 114, 178], // blue
+    [213,  94,   0], // vermilion
+    [204, 121, 167], // reddish purple
+    [140, 140, 140], // neutral grey (Okabe–Ito's black, lightened for dark UIs)
 ];
+
+/// Outline styles, cycled one step slower than the colours so that when the
+/// palette wraps the STYLE differs.
+///
+/// This is the fix for two problems at once. Colour alone is not an accessible
+/// encoding (WCAG 1.4.1), and `id % 8` means family 8 gets family 0's colour with
+/// nothing else to tell them apart — routine over a long session, since every
+/// hand-typed family name allocates a fresh id. A dash pattern survives both
+/// colour blindness and greyscale printing.
+///
+/// `None` = solid. `Some(dash_len)` = dashes of that length in leaf pixels.
+const CLUSTER_DASH: [Option<f32>; 4] = [None, Some(6.0), Some(2.5), Some(12.0)];
 
 const GALLERY_PER_PAGE: usize = 60;
 
+/// Per-family colour overrides, set by clicking a swatch.
+///
+/// A module-level table rather than tab state because `cluster_color` is a free
+/// function called from ~20 places — the canvas painter, every swatch, the
+/// export overlays, the leaf gallery. Threading a `&PipelineTab` through all of
+/// them to support a cosmetic preference would be a worse trade than one
+/// process-wide map, and there is only ever one pipeline tab.
+static FAMILY_COLORS: std::sync::OnceLock<std::sync::Mutex<HashMap<i32, [u8; 3]>>> =
+    std::sync::OnceLock::new();
+
+fn family_colors() -> &'static std::sync::Mutex<HashMap<i32, [u8; 3]>> {
+    FAMILY_COLORS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub fn set_family_color(id: i32, rgb: Option<[u8; 3]>) {
+    if let Ok(mut m) = family_colors().lock() {
+        match rgb {
+            Some(c) => { m.insert(id, c); }
+            None => { m.remove(&id); }
+        }
+    }
+}
+
+pub fn family_color_overrides() -> HashMap<i32, [u8; 3]> {
+    family_colors().lock().map(|m| m.clone()).unwrap_or_default()
+}
+
 fn cluster_color(id: i32) -> [u8; 3] {
+    if let Ok(m) = family_colors().lock() {
+        if let Some(c) = m.get(&id) {
+            return *c;
+        }
+    }
     if id < 0 {
         [150, 150, 150] // noise
     } else {
         CLUSTER_PALETTE[id as usize % CLUSTER_PALETTE.len()]
+    }
+}
+
+/// Where results go when the user has not said otherwise: a sibling of the
+/// source folder, named after it.
+///
+/// A sibling rather than a child, because `list_images` walks the source folder
+/// recursively — an output nested inside it would be re-scanned on the next run
+/// and every leaf cut-out would come back as a new "photograph". Suffixed and
+/// de-duplicated so a second run on the same folder does not silently write into
+/// the first run's results.
+fn derived_output_for(src: &std::path::Path) -> Option<PathBuf> {
+    let parent = src.parent()?;
+    let stem = src.file_name()?.to_string_lossy().to_string();
+    let base = parent.join(format!("{stem}_lacuna"));
+    if !base.exists() {
+        return Some(base);
+    }
+    for n in 2..100 {
+        let c = parent.join(format!("{stem}_lacuna{n}"));
+        if !c.exists() {
+            return Some(c);
+        }
+    }
+    Some(base)
+}
+
+/// Centre of mass of a region's mask, in LEAF coordinates.
+///
+/// `AnomalyRegion` keeps a bbox and a bbox-local mask but no centroid — the
+/// detection path had one on its own `Region` type and dropped it on conversion.
+/// `embed_crop` centres its window here, so this has to be the mask's centroid
+/// and not the bbox centre: for an L-shaped or crescent region those differ
+/// enough to shift the crop off the tissue being embedded.
+fn region_centroid(r: &AnomalyRegion) -> [f32; 2] {
+    let [bx, by, bw, bh] = r.bbox_leaf;
+    let (mut sx, mut sy, mut n) = (0f64, 0f64, 0usize);
+    for y in 0..bh {
+        for x in 0..bw {
+            if r.mask.get((y * bw + x) as usize).copied().unwrap_or(false) {
+                sx += (bx + x) as f64;
+                sy += (by + y) as f64;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        [(bx + bw / 2) as f32, (by + bh / 2) as f32]
+    } else {
+        [(sx / n as f64) as f32, (sy / n as f64) as f32]
+    }
+}
+
+/// Draw a family's swatch: its colour AND its outline style, so the legend
+/// teaches the second cue rather than leaving it to be discovered on the canvas.
+/// Without this the dash pattern is a code with no key.
+fn family_swatch(ui: &mut Ui, id: i32, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size * 1.8, size), egui::Sense::hover());
+    let c = cluster_color(id);
+    let col = Color32::from_rgb(c[0], c[1], c[2]);
+    let p = ui.painter();
+    match cluster_dash(id) {
+        None => {
+            p.rect_filled(rect, 2.0, col);
+        }
+        Some(dash) => {
+            // Fainter fill plus a dashed rule across it — the same visual
+            // vocabulary the canvas outline uses for this family.
+            p.rect_filled(rect, 2.0, col.linear_multiply(0.30));
+            let y = rect.center().y;
+            let d = (dash * 0.9).clamp(2.0, 6.0);
+            p.add(egui::Shape::dashed_line(
+                &[egui::pos2(rect.left() + 1.0, y), egui::pos2(rect.right() - 1.0, y)],
+                egui::Stroke::new(2.0, col),
+                d,
+                d * 0.7,
+            ));
+        }
+    }
+}
+
+/// The dash pattern that goes with `cluster_color(id)`. Advances every time the
+/// colour wraps, so `id` and `id + 8` share a hue but never a style.
+fn cluster_dash(id: i32) -> Option<f32> {
+    if id < 0 {
+        Some(3.0) // noise: always dashed, so it reads as provisional
+    } else {
+        let cycle = (id as usize) / CLUSTER_PALETTE.len();
+        CLUSTER_DASH[cycle % CLUSTER_DASH.len()]
     }
 }
 
@@ -100,17 +254,126 @@ enum CanvasTool { Select, MarkHealthy, Brush, Eraser, Knife, Scissor, Lasso, Wan
 enum UndoEntry {
     Remove(Vec<usize>),
     Cut { originals: Vec<usize>, created: Vec<usize> },
+    /// Regions confirmed into the curation set. Only ids that were NOT already
+    /// persisted are recorded — undoing a confirm must not delete a curation the
+    /// user had written earlier by some other route.
+    ///
+    /// Confirm was the most-used write in the app and the only one of the four
+    /// editing actions with no undo at all: a mis-aimed "Confirm all remaining"
+    /// wrote hundreds of rows to disk with nothing to take them back.
+    Confirm(Vec<usize>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum BrushShape { Square, Circle }
 
+/// Which stage screen the Analyse tab is showing.
+#[derive(Clone, Copy, PartialEq)]
+enum StageView { Review, Done }
+
+const BASE_ROWS_HELP: &str = "\
+How many rows of the ORIGINAL training set get mixed into a retrain so it does \
+not forget what the head already knew.\n\n\
+Auto keeps roughly ten base rows per curated example, with a floor of 10,000 — \
+the configuration measured best (LEARNS 0.942 / KEEPS 0.476). The floor is the \
+measured part; the 10:1 ratio above it is a heuristic to hold that balance as \
+curations grow, not a separately validated optimum.\n\n\
+Turn it off to set the number by hand.";
+
+/// Canonical filenames for the retrain base set, searched in `models/`.
+/// `_headids` first: `base_set_gt.bin` uses the GROUND-TRUTH legend, whose class
+/// ids do not match the head's (it drops Holes and swaps Sucker/Nekrosis), so it
+/// must never be picked up automatically.
+const BASE_SET_NAMES: [&str; 2] = ["base_set_headids.bin", "base_set.bin"];
+
+/// Gallery ordering. The default is deliberately NOT detection order.
+#[derive(Clone, Copy, PartialEq)]
+enum GallerySort {
+    /// Least like its own family first — the review order that scales.
+    Unusual,
+    /// Biggest first: what dominates the measured area, so errors cost most.
+    Largest,
+}
+
+impl GallerySort {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unusual => "Unusual first",
+            Self::Largest => "Largest first",
+        }
+    }
+    const ALL: [Self; 2] = [Self::Unusual, Self::Largest];
+}
+
+/// `2905` -> `2,905`. Counts in the thousands are the norm here and unseparated
+/// digits are genuinely hard to compare at a glance.
+fn fmt_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// "45s", "17 min", "2 h 05 min" — coarse on purpose. False precision ("11:47
+/// remaining") invites the user to trust a number that is an extrapolation from
+/// an average, and then to notice it was wrong.
+fn humanize_secs(s: f64) -> String {
+    let s = s.max(0.0) as u64;
+    if s < 90 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{} min", (s + 30) / 60)
+    } else {
+        format!("{} h {:02} min", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// Image-writing half of an export, done a slice at a time.
+///
+/// A 10,000-leaf export is 10,000 full-resolution PNG encodes; doing it in one
+/// call froze the window for minutes with no progress and no way out — which
+/// reads as a crash. A worker thread is the obvious fix but the wrong one here:
+/// the overlays are composited from each leaf's own pixel buffer, and shipping
+/// 10,000 of those across a thread boundary means cloning gigabytes.
+///
+/// So it runs on the UI thread but yields: a bounded chunk per frame, progress
+/// on screen, cancellable. The CSV — the part that actually matters — is written
+/// up front and completely, so a cancelled export still leaves valid results.
+struct ExportJob {
+    crops_dir:  PathBuf,
+    leaves_dir: PathBuf,
+    /// Regions still to write, as (region index, filename).
+    crops:      Vec<(usize, String)>,
+    /// Leaves still to composite+write.
+    leaves:     Vec<usize>,
+    crop_cur:   usize,
+    leaf_cur:   usize,
+    written:    usize,
+    failed:     usize,
+    total:      usize,
+}
+
+/// Which action asked to wipe the run's in-memory review state. Both callers of
+/// `reset_run_state` discard the whole session — the leaf you were on, every
+/// rejection, the undo stack — and both were one unguarded click, one of them the
+/// largest, greenest button in the tab.
+#[derive(Clone, Copy, PartialEq)]
+enum PendingReset {
+    /// "Run Pipeline" pressed while a reviewed run is already loaded.
+    Rerun,
+    /// "Use this head now" after an in-place retrain.
+    SwitchHead,
+}
+
 /// Right-panel sub-tabs — splits what used to be one long scrolling column
 /// (leaf/morphology / stats / curation / retrain / export / log all stacked)
 /// into focused views, mirroring Photoshop's tabbed panel dock
 /// (Layers/Channels/Paths).
-#[derive(Clone, Copy, PartialEq)]
-enum ClusterPanelTab { Leaf, Clusters, Curate, Log }
 
 pub struct PipelineTab {
     source_folder: Option<PathBuf>,
@@ -140,6 +403,22 @@ pub struct PipelineTab {
     /// regions that hug the leaf outline instead of sitting inside it.
     filter_margin_holes: bool,
     hole_margin_px:      u32,
+    /// Write one PNG per anomaly into `export/crops/`. Off by default — on a
+    /// large run this dominates export time (one encode per anomaly), and the
+    /// CSV row plus the per-leaf overlay already describe every region.
+    export_crops:        bool,
+    /// Write one full-size overlay PNG per leaf into `export/leaves/`.
+    ///
+    /// Gating the per-anomaly crops but not these missed the larger cost: crops
+    /// are small thumbnails, whereas this is one FULL-RESOLUTION RGBA encode per
+    /// leaf — 10,000 of them on a 10,000-leaf batch, each with every region
+    /// painted in first. On a big run this is the dominant term in export time,
+    /// not the crops.
+    ///
+    /// Defaults ON because it is the existing behaviour and the overlays are the
+    /// main visual artefact; the cost is stated on the control so it can be an
+    /// informed choice rather than a surprise.
+    export_overlays:     bool,
     conf:            f32,
     seg_alpha_lo:    f32,   // YOLO cutout edge tightness (feather start)
     seg_chroma_min:  i32,   // YOLO cutout background-chroma rejection
@@ -158,8 +437,6 @@ pub struct PipelineTab {
     recut_threshold: f32,      // live UI value for the Adaptive re-cut slider
 
     // segmentation preview (tune the cutout edge before a full run)
-    preview_tex:  Option<egui::TextureHandle>,
-    preview_rx:   Option<mpsc::Receiver<Result<(Vec<u8>, u32, u32), String>>>,
     preview_busy: bool,
     preview_note: String,
 
@@ -203,7 +480,12 @@ pub struct PipelineTab {
     leaf_valid_px: Vec<u32>,                // parallel to results; cached once (was a per-frame megapixel scan)
     selected_idx: Option<usize>,
     overlay_tex:  Option<egui::TextureHandle>,
-    overlay_key:  Option<(usize, Option<i32>, bool, u32, bool)>, // leaf, cluster, recon, opacity%, outline
+    // leaf, cluster, recon, opacity%, outline, regions.len().
+    // The region count is part of the key so the live per-leaf preview is
+    // replaced the moment clustering delivers real regions — without it the
+    // cached preview texture would survive and the leaf would keep showing
+    // provisional colours after the run finished.
+    overlay_key:  Option<(usize, Option<i32>, bool, u32, bool, usize)>,
     show_recon:   bool,   // overlay the reconstructed (filled-in) leaf area on the canvas
     overlay_alpha: f32,   // cluster overlay opacity (fill mode) — see the leaf beneath
     overlay_outline: bool, // draw cluster OUTLINES instead of filled pixels
@@ -231,7 +513,6 @@ pub struct PipelineTab {
     wand_tolerance:  f32,                             // Lab a/b distance threshold for the flood-fill
     wand_lab_cache:  Option<(usize, Vec<f32>, Vec<f32>, Vec<f32>)>, // (leaf_idx, L, a, b) — recomputed only on leaf change
     wand_mask_tex:   Option<egui::TextureHandle>, // cached render of wand_mask, rebuilt only when the mask changes
-    cluster_panel_tab: ClusterPanelTab,
 
     // clustering (filled by PipeMsg::Clusters)
     regions:          Vec<AnomalyRegion>,
@@ -254,6 +535,9 @@ pub struct PipelineTab {
     filter_leaf_only: bool,
     selected_region:  Option<usize>,   // anomaly highlighted with a bbox on the leaf
     gallery_page:     usize,           // anomaly gallery pagination
+    /// Gallery ordering — see GallerySort. Defaults to Unusual: with thousands
+    /// of regions per leaf, detection order is not a review order.
+    gallery_sort:     GallerySort,
     scroll_to_selected: bool,          // one-shot: scroll the gallery to selected_region
     // one-shot: scroll the LEAF strip to selected_idx. Set by the arrow-key
     // hotkeys only, not by clicking — a click already puts the tile under the
@@ -284,6 +568,73 @@ pub struct PipelineTab {
     // invisible" would otherwise read as "fully reviewed" and feed the whole
     // rejected leaf to the miner as healthy tissue.
     rejected_leaves:  HashSet<usize>,
+    // Leaf indices the user has looked at and is happy with. Purely a review
+    // bookmark: unlike `rejected_leaves` it changes NOTHING about export,
+    // counting or mining — it exists so a 10,000-leaf batch can be worked across
+    // several sittings without losing your place.
+    reviewed:         HashSet<usize>,
+    // Keyboard bindings, and the help overlay's state. `rebinding` holds the
+    // action id awaiting a keypress; while it is set, normal key dispatch is
+    // suppressed so pressing a key to BIND it cannot also FIRE it.
+    keymap:           shortcuts::Keymap,
+    help_open:        bool,
+    rebinding:        Option<String>,
+    // Pending irreversible actions, held until confirmed. `Option` rather than a
+    // bool so the dialog can name exactly what it is about to destroy — a dialog
+    // that says "are you sure?" without saying what teaches people to click yes.
+    // Command palette state. palette_focused exists because egui only honours
+    // request_focus once per widget lifetime, so it must fire on the frame the
+    // window opens and not on every frame after.
+    // On-demand appearance ranking (see worker::spawn_rank). Mutually exclusive
+    // with the other GPU consumers — it loads its own DINO extractor.
+    rank_rx:        Option<mpsc::Receiver<RankMsg>>,
+    rank_cancel:    Arc<AtomicBool>,
+    ranking:        bool,
+    rank_done:      usize,
+    rank_total:     usize,
+    /// Settings column visible. Collapsed, the canvas gains ~250px — which is
+    /// what review actually needs, since the folders and Run button are set once
+    /// at the start and never touched again during a batch.
+    /// Run-setup window (folders, calibration, Run) — opened from the top bar.
+    setup_open:       bool,
+    /// Family whose colour is being changed, if any.
+    /// Which stage screen is showing. Review is the workspace; Done is the
+    /// finish screen reached from the Export pill.
+    stage_view:       StageView,
+    /// One-shot request to force the Done screen's "Improve the model" section
+    /// open (set by "Teach the model"); cleared the frame it is honoured.
+    improve_open_req: bool,
+    recolour_family:  Option<i32>,
+    /// Action requested from a &self-ish draw context, run after the frame's
+    /// panels close so it can take &mut self without fighting the borrow.
+    perform_action_deferred: Option<String>,
+    /// Regions set aside for a second pass. Purely a review aid — never
+    /// written to disk and never affects export.
+    flagged:          HashSet<usize>,
+    filter_flagged:   bool,
+    /// In-flight image export, stepped a chunk per frame. See ExportJob.
+    export_job:       Option<ExportJob>,
+    palette_open:     bool,
+    palette_query:    String,
+    palette_sel:      usize,
+    palette_focused:  bool,
+    pending_delete_cluster: Option<i32>,
+    pending_reset:          Option<PendingReset>,
+    /// When the current run started, for throughput and ETA. `None` when idle.
+    run_started_at:         Option<std::time::Instant>,
+    // Review state loaded from disk at run start, keyed by (source path relative
+    // to the source folder, ordinal of the leaf WITHIN that photo).
+    //
+    // Deliberately NOT keyed by leaf index: indices are assigned in emit order at
+    // run time and are not stable across runs, so index-keyed state silently
+    // reattaches to the wrong leaf when anything upstream changes. That is the
+    // same failure that let the base set's class ids swap Sucker and Nekrosis
+    // unnoticed. Value carries (state, w, h) so a segmentation change can be
+    // DETECTED rather than silently mis-restored.
+    review_marks:     HashMap<(String, u32), (String, u32, u32)>,
+    // Leaves whose stored mark referred to a differently-sized leaf — reported
+    // once, never silently applied.
+    review_mismatch:  usize,
     cluster_names:    HashMap<i32, String>,
     multi_selected:   HashSet<usize>,       // gallery tiles OR canvas rubber-band picks, for bulk reassign
     reassign_name:    String,               // target cluster name typed for bulk reassign
@@ -334,6 +685,17 @@ pub struct PipelineTab {
     /// retrain so curations fine-tune the head instead of replacing it.
     retrain_base_set:  Option<PathBuf>,
     retrain_base_rows: usize,
+    /// Derive `base_rows` from the curation count instead of the manual value.
+    retrain_auto_base_rows: bool,
+    /// Gate for the destructive "delete every curation" confirm dialog.
+    confirm_clear_curations: bool,
+    /// results.csv shape: false = one row per anomaly, true = one row per leaf
+    /// with per-family columns.
+    export_wide: bool,
+    /// Cached line count of `<output>/curations/labels.jsonl`, keyed by the
+    /// file's (len, mtime) so the panel does not re-read a growing jsonl on
+    /// every frame it draws.
+    curation_count_cache: Option<(u64, Option<std::time::SystemTime>, usize)>,
     /// See `RetrainCfg::anchor` - pull the L2 penalty toward the current head
     /// instead of toward zero, so curations correct without competing for influence.
     retrain_anchor:    f32,
@@ -382,6 +744,8 @@ impl PipelineTab {
             min_hole_area:   16,
             filter_margin_holes: false, // opt-in: changes what gets reported
             hole_margin_px:      16,
+            export_crops:        false, // one encode per anomaly
+            export_overlays:     true,  // existing behaviour; one encode per leaf
             conf:            0.25,
             seg_alpha_lo:    0.0,
             seg_chroma_min:  0,
@@ -396,8 +760,6 @@ impl PipelineTab {
             recut_mode:      CutMode::FixedK,
             recut_threshold: 8.0,
 
-            preview_tex:  None,
-            preview_rx:   None,
             preview_busy: false,
             preview_note: String::new(),
 
@@ -445,7 +807,6 @@ impl PipelineTab {
             wand_tolerance:  14.0,
             wand_lab_cache:  None,
             wand_mask_tex:   None,
-            cluster_panel_tab: ClusterPanelTab::Curate,
 
             regions:          Vec::new(),
             region_area:      Vec::new(),
@@ -454,9 +815,10 @@ impl PipelineTab {
             clusters:         Vec::new(),
             head_cache:       None,
             selected_cluster: None,
-            filter_leaf_only: false,
+            filter_leaf_only: true,
             selected_region:  None,
             gallery_page:     0,
+            gallery_sort:     GallerySort::Unusual,
             scroll_to_selected: false,
             scroll_to_leaf:     false,
             region_thumbs:    Vec::new(),
@@ -465,6 +827,32 @@ impl PipelineTab {
             persisted:        HashSet::new(),
             merged_away:      HashSet::new(),
             rejected_leaves:  HashSet::new(),
+            reviewed:         HashSet::new(),
+            keymap:           shortcuts::Keymap::default(),
+            help_open:        false,
+            rebinding:        None,
+            rank_rx:        None,
+            rank_cancel:    Arc::new(AtomicBool::new(false)),
+            ranking:        false,
+            rank_done:      0,
+            rank_total:     0,
+            setup_open:       false,
+            stage_view:       StageView::Review,
+            improve_open_req: false,
+            recolour_family:  None,
+            perform_action_deferred: None,
+            flagged:          HashSet::new(),
+            filter_flagged:   false,
+            export_job:       None,
+            palette_open:     false,
+            palette_query:    String::new(),
+            palette_sel:      0,
+            palette_focused:  false,
+            pending_delete_cluster: None,
+            pending_reset:          None,
+            run_started_at:         None,
+            review_marks:     HashMap::new(),
+            review_mismatch:  0,
             cluster_names:    HashMap::new(),
             multi_selected:   HashSet::new(),
             reassign_name:    String::new(),
@@ -492,8 +880,12 @@ impl PipelineTab {
             retrain_done:   None,
             retrain_cold_start: false,
             retrain_dump:       false,
-            retrain_base_set:   None,
+            retrain_base_set:   Self::default_base_set(),
             retrain_base_rows:  10_000,
+            retrain_auto_base_rows: true,
+            confirm_clear_curations: false,
+            export_wide:        true,  // leaf is the sampling unit; long needs a pivot
+            curation_count_cache:   None,
             retrain_anchor:     1.0,
 
             mine_healthy_dir:    None,
@@ -561,7 +953,9 @@ impl PipelineTab {
 
     // ── lifecycle ─────────────────────────────────────────────────────────
 
-    pub fn needs_repaint(&self) -> bool { self.running || self.retraining || self.mining }
+    pub fn needs_repaint(&self) -> bool {
+        self.running || self.retraining || self.mining || self.ranking || self.export_job.is_some()
+    }
 
     pub fn save_settings(&self, s: &mut AppSettings) {
         let r = &mut s.pipeline;
@@ -579,6 +973,22 @@ impl PipelineTab {
         r.domain_projection = self.domain_projection;
         r.head_tau           = self.head_tau;
         r.head_grow          = self.head_grow;
+        r.shortcuts          = self.keymap.to_map();
+        // These seven change what results.csv contains and were silently lost on
+        // every restart — see PipelineSettings for the full note.
+        r.conf               = self.conf;
+        r.seg_alpha_lo       = self.seg_alpha_lo;
+        r.seg_chroma_min     = self.seg_chroma_min;
+        r.detect_holes       = self.detect_holes;
+        r.min_hole_area      = self.min_hole_area;
+        r.filter_margin_holes = self.filter_margin_holes;
+        r.hole_margin_px     = self.hole_margin_px;
+        r.export_crops       = self.export_crops;
+        r.export_overlays    = self.export_overlays;
+        r.export_wide        = self.export_wide;
+        r.filter_leaf_only   = self.filter_leaf_only;
+        r.family_colors      = family_color_overrides()
+            .into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         r.tile_size          = self.tile_size;
         r.margin_erode_px    = self.margin_erode_px;
         r.cluster_eps        = self.cluster_eps;
@@ -605,6 +1015,21 @@ impl PipelineTab {
         self.domain_projection = r.domain_projection;
         self.head_tau      = r.head_tau;
         self.head_grow     = r.head_grow;
+        self.keymap        = shortcuts::Keymap::from_map(&r.shortcuts);
+        self.conf          = r.conf;
+        self.seg_alpha_lo  = r.seg_alpha_lo;
+        self.seg_chroma_min = r.seg_chroma_min;
+        self.detect_holes  = r.detect_holes;
+        self.min_hole_area = r.min_hole_area;
+        self.filter_margin_holes = r.filter_margin_holes;
+        self.hole_margin_px = r.hole_margin_px;
+        self.export_crops  = r.export_crops;
+        self.export_overlays = r.export_overlays;
+        self.export_wide     = r.export_wide;
+        self.filter_leaf_only = r.filter_leaf_only;
+        for (k, v) in &r.family_colors {
+            if let Ok(id) = k.parse::<i32>() { set_family_color(id, Some(*v)); }
+        }
         self.tile_size     = r.tile_size;
         self.margin_erode_px = r.margin_erode_px;
         self.cluster_eps     = r.cluster_eps;
@@ -624,7 +1049,8 @@ impl PipelineTab {
         self.poll_worker(toasts);
         self.poll_retrain(toasts);
         self.poll_mine(toasts);
-        self.poll_preview(ctx);
+        self.poll_rank(toasts);
+        self.step_export(toasts);
         self.poll_calibration_preview(ctx);
         self.poll_calibration_detect(ctx, toasts);
         self.poll_calibrate(toasts);
@@ -636,15 +1062,94 @@ impl PipelineTab {
         egui::TopBottomPanel::top("pipeline_qol_bar")
             .exact_height(32.0)
             .show_inside(ui, |ui| self.show_qol_bar(ui, toasts));
-        egui::SidePanel::left("pipeline_controls")
-            .exact_width(ui_kit::CONTROL_W)
-            .show_inside(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("pipeline_ctrl_scroll")
-                    .show(ui, |ui| self.show_controls(ui));
+        // ── nothing loaded: the flow screen IS the app ──────────────────────
+        // Not a panel among panels. Before a run there is exactly one thing to
+        // do, and surrounding it with an empty canvas, an empty gallery and a
+        // cluster panel that says "run the pipeline first" made the app look
+        // complicated at the precise moment it is simplest.
+        if self.results.is_empty() && !self.running {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("start_scroll").show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(28.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(460.0, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| self.show_start_screen(ui),
+                        );
+                    });
+                });
             });
+            self.show_shortcuts_window(ctx);
+            // MUST be here too. This branch returns before the shared panel code
+            // below, so without this the start screen's "Change folders…" set
+            // `setup_open = true` and nothing ever drew the window — the button
+            // was dead on the one screen that most needs it.
+            self.show_setup_window(ctx);
+            self.show_command_palette(ctx, toasts);
+            self.show_confirm_dialogs(ctx, toasts);
+            return;
+        }
+
+        // Done screen: a full screen, not a panel — an ending should feel like
+        // arriving somewhere, not like another tab.
+        if self.stage_view == StageView::Done && !self.running {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("done_scroll").show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(24.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(520.0, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| self.show_done_screen(ui, toasts),
+                        );
+                    });
+                });
+            });
+            self.show_shortcuts_window(ctx);
+            self.show_setup_window(ctx);
+            self.show_command_palette(ctx, toasts);
+            self.show_confirm_dialogs(ctx, toasts);
+            if let Some(id) = self.perform_action_deferred.take() {
+                self.perform_action(&id, toasts);
+            }
+            return;
+        }
+
+        // ── tools rail, always visible ──────────────────────────────────────
+        // Split out of the 300px control column so the canvas can have the room.
+        // The old panel mixed "what my mouse does right now" with "what a
+        // six-hour batch job will do", separated by a hairline, and cost 300px
+        // permanently — on a 1440-wide window the two side panels took 46% of the
+        // width before the image got any.
+        egui::SidePanel::left("pipeline_rail")
+            .exact_width(52.0)
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("rail_scroll").show(ui, |ui| {
+                    self.show_toolbox(ui);
+                });
+            });
+        // The active tool's settings, floating just beside the rail rather than
+        // stretched across a global bar.
+        //
+        // Where tool settings belong is a spatial-mapping question: they configure
+        // THAT tool, so they should sit next to it, not in a strip shared with
+        // opacity and zoom where they read as another global control. Floating
+        // also means they cost no layout — nothing reflows when the active tool
+        // changes, which is what made the top bar wiggle.
+        self.show_tool_options_popover(ctx);
         egui::SidePanel::right("pipeline_clusters")
-            .default_width(360.0)
+            .default_width(380.0)
+            // BOUNDED. `ui.available_width()` in the legend and verdict rows,
+            // inside a content-sized scroll area, inside a resizable panel, is a
+            // feedback loop: the row asks for the available width, the panel
+            // grows to fit the row, which makes more width available… The panel
+            // grew without limit as the pointer moved. The scroll area is also
+            // pinned (`auto_shrink false`) so its width comes from the panel
+            // rather than from its contents.
+            .min_width(300.0)
+            .max_width(560.0)
             .resizable(true)
             .show_inside(ui, |ui| self.show_cluster_panel(ui, ctx, toasts));
         egui::TopBottomPanel::bottom("pipeline_gallery")
@@ -652,6 +1157,14 @@ impl PipelineTab {
             .min_height(108.0)
             .show_inside(ui, |ui| self.show_gallery(ui, ctx));
         egui::CentralPanel::default().show_inside(ui, |ui| self.show_canvas(ui, ctx, toasts));
+        // Last, so these float above every panel.
+        self.show_shortcuts_window(ctx);
+        self.show_setup_window(ctx);
+        self.show_command_palette(ctx, toasts);
+        self.show_confirm_dialogs(ctx, toasts);
+        if let Some(id) = self.perform_action_deferred.take() {
+            self.perform_action(&id, toasts);
+        }
     }
 
     /// Top QoL strip: focus-mode status + the overlay-appearance toggles that
@@ -664,11 +1177,21 @@ impl PipelineTab {
             ui.add_space(6.0);
             self.show_reject_leaf_button(ui, toasts);
             ui.separator();
+            // Say plainly that the amber overlay is provisional. Without this the
+            // preview is indistinguishable from a finished result whose families
+            // all happen to be one colour.
+            if let Some(i) = self.selected_idx {
+                let previewing = self.results.get(i).map_or(false, |l| !l.anomaly.is_empty())
+                    && !self.regions.iter().any(|r| r.leaf == i);
+                if previewing {
+                    ui.label(RichText::new("live preview — families assigned after clustering")
+                        .small().color(Color32::from_rgb(235, 165, 60)));
+                    ui.separator();
+                }
+            }
             if let Some(cid) = self.selected_cluster {
                 let name = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
-                let col = cluster_color(cid);
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(col[0], col[1], col[2]));
+                family_swatch(ui, cid, 10.0);
                 ui.label(format!("Focused: {name}"));
                 if ui.small_button("✕ Exit focus").clicked() {
                     self.selected_cluster = None;
@@ -679,37 +1202,97 @@ impl PipelineTab {
                 ui.label(RichText::new("No cluster focused").color(Color32::GRAY));
             }
             ui.separator();
+
+            // Every control below is ALWAYS present, disabled rather than hidden
+            // when it does not apply.
+            //
+            // Two bugs came out of doing it the other way. The recon checkbox and
+            // the opacity slider were each wrapped in an `if`, so ticking Outline
+            // or Show-reconstruction added or removed a widget and everything to
+            // its right jumped — reported as the bar "wiggling". And the
+            // right-aligned Shortcuts button was emitted BEFORE the slider:
+            // `right_to_left` claims the rest of the row, so the slider had no
+            // space left and simply never appeared.
             let has_recon = self.selected_idx.and_then(|i| self.results.get(i))
                 .map_or(false, |l| !l.recon_mask.is_empty());
-            if has_recon {
-                ui.checkbox(&mut self.show_recon, "Show reconstruction")
+            ui.add_enabled_ui(has_recon, |ui| {
+                if ui.checkbox(&mut self.show_recon, "Show reconstruction")
                     .on_hover_text("Tint (under the anomalies) the area the model reconstructed —\n\
                                     where the leaf was damaged/missing — so you see the whole intact\n\
-                                    leaf with the damage as holes.");
-                ui.separator();
-            }
+                                    leaf with the damage as holes.")
+                    .on_disabled_hover_text("This leaf has no reconstruction — enable it in \
+                                             Settings and re-run.")
+                    .changed()
+                {
+                    self.overlay_tex = None;
+                }
+            });
+            ui.separator();
             if ui.checkbox(&mut self.overlay_outline, "Outline")
                 .on_hover_text("Draw cluster OUTLINES (leaf fully visible inside) instead of\n\
-                                filled pixels. Same family colours.")
+                                filled pixels. Same family colours and dash styles.")
                 .changed()
             {
                 self.overlay_tex = None;
             }
-            // Shown whenever anything on the canvas actually respects this
-            // slider: fill-mode regions (not outline mode), OR the
-            // reconstruction-preview tint (`show_recon`, which paints in
-            // BOTH outline and fill mode).
-            if !self.overlay_outline || self.show_recon {
-                ui.scope(|ui| {
-                    ui.spacing_mut().slider_width = 160.0;
+            // Opacity applies to fill-mode regions and to the reconstruction tint
+            // (which paints in both modes), so it is live unless neither is.
+            let alpha_applies = !self.overlay_outline || (has_recon && self.show_recon);
+            ui.scope(|ui| {
+                ui.spacing_mut().slider_width = 150.0;
+                ui.add_enabled_ui(alpha_applies, |ui| {
                     if ui.add(egui::Slider::new(&mut self.overlay_alpha, 0.1..=1.0)
                         .text("opacity")
-                        .fixed_decimals(2)).changed()
+                        .fixed_decimals(2))
+                        .on_disabled_hover_text("Outline mode draws contours, which have no fill \
+                                                 to make transparent.")
+                        .changed()
                     {
                         self.overlay_tex = None;
                     }
                 });
+            });
+
+            // Zoom lives here now, beside opacity, rather than in a banner over
+            // the canvas — it is a view control like the other two.
+            ui.separator();
+            ui.label(RichText::new(format!("{:.0}%", self.canvas_zoom * 100.0))
+                .small().color(ui_kit::MUTED()));
+            if ui.small_button("Fit")
+                .on_hover_text("Reset zoom and pan. Scroll to zoom, middle-drag to pan.")
+                .clicked()
+            {
+                self.canvas_zoom = 1.0;
+                self.canvas_pan = egui::Vec2::ZERO;
             }
+
+            // Right-aligned LAST, so it cannot steal the row from the controls
+            // above it. A visible entry point matters more than the F1 binding:
+            // someone who does not know shortcuts exist will never press a key to
+            // find out.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                let k = shortcuts::key_label(self.keymap.key("help"));
+                if ui.small_button(format!("Shortcuts  ({k})"))
+                    .on_hover_text("Every keyboard shortcut, what it does, and how to change it.")
+                    .clicked()
+                {
+                    self.help_open = !self.help_open;
+                }
+                // No "Commands" button. Anyone who uses a command palette opens
+                // it with the key; anyone who does not was never going to click a
+                // button labelled with a keyboard shortcut. The Shortcuts window
+                // beside this lists the binding for the few who go looking.
+                // Reachable, but not a permanent column: folders, calibration and
+                // Run are set once at the start of a batch and then never touched
+                // for hours, so they do not earn standing screen space.
+                if ui.small_button("Setup")
+                    .on_hover_text("Folders, calibration, and starting another run.")
+                    .clicked()
+                {
+                    self.setup_open = !self.setup_open;
+                }
+            });
         });
     }
 
@@ -724,14 +1307,80 @@ impl PipelineTab {
     /// last leaf back to the first, which during a long review reads as "the
     /// list reset" and is very easy to not notice.
     fn handle_leaf_hotkeys(&mut self, ctx: &Context, toasts: &mut ToastManager) {
-        if self.results.is_empty() || ctx.memory(|m| m.focused().is_some()) {
+        // Help is reachable even with no results — it is how a new user finds out
+        // what any of this does.
+        if self.rebinding.is_none()
+            && !ctx.memory(|m| m.focused().is_some())
+            && ctx.input(|i| self.keymap.pressed(i, "help"))
+        {
+            self.help_open = !self.help_open;
+        }
+        // Ctrl+K anywhere, including with a field focused — a palette you cannot
+        // reach without first clicking away is a palette people stop using.
+        // Space does the same thing, but ONLY when nothing has keyboard focus:
+        // it is a printable character, so firing it into a text field would make
+        // the palette impossible to type a space into.
+        let plain_palette_key = self.keymap.key("palette");
+        let focused = ctx.memory(|m| m.focused().is_some());
+        let by_ctrl_k = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K));
+        let by_plain = !focused
+            && !shortcuts::is_unbound(plain_palette_key)
+            && ctx.input(|i| !i.modifiers.any() && i.key_pressed(plain_palette_key));
+        if !self.palette_open && self.rebinding.is_none() && (by_ctrl_k || by_plain) {
+            self.palette_open = true;
+            self.palette_query.clear();
+            self.palette_sel = 0;
             return;
         }
-        let (prev, next, reject) = ctx.input(|i| (
-            i.key_pressed(egui::Key::ArrowLeft),
-            i.key_pressed(egui::Key::ArrowRight),
-            i.key_pressed(egui::Key::X),
+        if self.results.is_empty()
+            || self.rebinding.is_some()
+            || self.palette_open
+            || ctx.memory(|m| m.focused().is_some())
+        {
+            return;
+        }
+        // Unmodified keys only: Ctrl+K must not also fire whatever K is bound to,
+        // and Ctrl+Z belongs to undo rather than to the tool on Z.
+        let plain = ctx.input(|i| !i.modifiers.any());
+        let (prev, next, reject, mark, jump) = ctx.input(|i| (
+            plain && self.keymap.pressed(i, "leaf.prev"),
+            plain && self.keymap.pressed(i, "leaf.next"),
+            plain && self.keymap.pressed(i, "leaf.reject"),
+            plain && self.keymap.pressed(i, "leaf.reviewed"),
+            plain && self.keymap.pressed(i, "leaf.next_unreviewed"),
         ));
+        // ── 1..9 assign a family to the current selection ───────────────────
+        // The mockup's central review gesture. Order matches the cluster panel's
+        // own listing, so the number a user sees beside a family is the key that
+        // assigns it — position and mapping stay in step.
+        if plain {
+            let pressed = ctx.input(|i| {
+                use egui::Key::*;
+                [Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9]
+                    .iter().position(|k| i.key_pressed(*k))
+            });
+            if let Some(slot) = pressed {
+                let ids: Vec<i32> = self.clusters.iter().map(|c| c.id).filter(|&id| id >= 0).collect();
+                if let Some(&cid) = ids.get(slot) {
+                    let sel = self.effective_selection();
+                    if !sel.is_empty() {
+                        let name = self.class_display_name(cid);
+                        self.reassign_ids(&sel, cid, &name, toasts);
+                    }
+                }
+            }
+        }
+
+        // View toggles have no dedicated UI keys elsewhere, so they dispatch here.
+        for id in ["region.next", "region.prev", "region.flag",
+                   "view.outline", "view.recon", "view.clear_focus", "view.fit", "view.panel",
+                   "run.start", "run.cancel", "review.export", "review.confirm_family",
+                   "review.undo"] {
+            let k = self.keymap.key(id);
+            if !shortcuts::is_unbound(k) && plain && ctx.input(|i| i.key_pressed(k)) {
+                self.perform_action(id, toasts);
+            }
+        }
         if prev || next {
             let n = self.results.len();
             let target = match self.selected_idx {
@@ -751,6 +1400,26 @@ impl PipelineTab {
                 self.toggle_reject_leaf(li, toasts);
             }
         }
+        // M marks the current leaf done. Deliberately does NOT auto-advance:
+        // marking and moving are separate decisions, and binding them would make
+        // an accidental M skip a leaf you never looked at. N is the advance.
+        if mark {
+            if let Some(li) = self.selected_idx {
+                self.toggle_reviewed(li, toasts);
+            }
+        }
+        if jump {
+            let from = self.selected_idx.map_or(0, |i| i + 1);
+            match self.next_unreviewed(from) {
+                Some(t) => {
+                    self.selected_idx = Some(t);
+                    self.selected_region = None;
+                    self.overlay_tex = None;
+                    self.scroll_to_leaf = true;
+                }
+                None => toasts.success("Every leaf has been reviewed or rejected."),
+            }
+        }
     }
 
     /// Whole-leaf reject/restore, first control in the top bar.
@@ -768,10 +1437,33 @@ impl PipelineTab {
         let rejected = self.rejected_leaves.contains(&li);
         let n = self.regions.iter().filter(|r| r.leaf == li).count();
 
+        // "Reviewed" sits beside reject because they are the two whole-leaf
+        // verdicts and both persist. The hotkey is printed on the button — that
+        // is the mechanism by which mouse users ever learn it exists.
+        if !rejected {
+            let done = self.reviewed.contains(&li);
+            let label = if done { "Reviewed  (M)" } else { "Mark reviewed  (M)" };
+            let mut btn = egui::Button::new(RichText::new(label).strong());
+            if done {
+                btn = btn.fill(ui_kit::ACCENT());
+            }
+            if ui.add(btn)
+                .on_hover_text(
+                    "Bookmark this leaf as looked-at. Saved to disk, so a long batch \
+                     can be worked over several sittings.\n\nUnlike Reject, it changes \
+                     nothing about the export — it only drives progress and the N key.\n\n\
+                     M toggles · N jumps to the next unreviewed leaf",
+                )
+                .clicked()
+            {
+                self.toggle_reviewed(li, toasts);
+            }
+        }
+
         if rejected {
-            ui.label(RichText::new(format!("⚠ Leaf {li} rejected"))
+            ui.label(RichText::new(format!("Leaf {li} rejected"))
                 .color(Color32::from_rgb(220, 110, 110)).strong());
-            if ui.button("✓ Restore leaf  (X)")
+            if ui.button("Restore leaf  (X)")
                 .on_hover_text("Put this leaf back into the run — its anomalies count and export again.\n\n\
                                 Hotkey: X   ·   ← / → step between leaves")
                 .clicked()
@@ -780,7 +1472,7 @@ impl PipelineTab {
             }
         } else {
             let btn = egui::Button::new(
-                RichText::new("✕ Reject leaf  (X)").color(Color32::WHITE).strong(),
+                RichText::new("Reject leaf  (X)").color(Color32::WHITE).strong(),
             ).fill(Color32::from_rgb(170, 55, 55));
             if ui.add(btn)
                 .on_hover_text(format!(
@@ -805,76 +1497,159 @@ impl PipelineTab {
     fn show_toolbox(&mut self, ui: &mut Ui) {
         ui_kit::section_header(ui, "Tools");
         let mut switched_to: Option<CanvasTool> = None;
-        let tool_btn = |ui: &mut Ui, tool: CanvasTool, icon: &str, name: &str, tip: &str,
-                             cur: &mut CanvasTool, switched: &mut Option<CanvasTool>| {
-            let active = *cur == tool;
-            let text = RichText::new(icon).size(15.0);
-            let btn = if active {
-                egui::Button::new(text.color(Color32::BLACK)).fill(ui_kit::ACCENT)
+        // The key is PRINTED under the icon, not just mentioned in the tooltip.
+        // Measured shortcut adoption is ~10% even among experienced users, and the
+        // reliable transfer mechanism is showing the binding at the point of the
+        // mouse action — a tooltip is still hidden until you go looking.
+        // Each tool is ONE fixed-size cell. `horizontal_wrapped` decides whether to
+        // wrap from the width a child reports, and a nested `ui.vertical` only
+        // reports its width after laying out its contents — so the row overflowed
+        // the 300px panel and the last tool was clipped instead of wrapping to a
+        // second line. Allocating the cell up front gives the wrap logic a width
+        // it can act on before the content exists.
+        // Vertical rhythm, all of it explicit — see the `item_spacing.y = 0`
+        // below, which makes the pitch exactly CELL.y with nothing added behind
+        // my back.
+        //
+        // The numbers encode GROUPING, not just size. A key label 2px under its
+        // button and 6px above the next one sits almost equidistant between the
+        // two, so it reads as floating in the gap rather than as belonging to
+        // the button above it, and the whole rail looks like one clamped stack.
+        // Tight above (LABEL_GAP), roomy below (the remainder), so each
+        // button+key is unambiguously one unit.
+        const BTN_H: f32 = 28.0;
+        const LABEL_GAP: f32 = 2.0;
+        const CELL: egui::Vec2 = egui::vec2(34.0, 56.0);
+        // Both earlier attempts at this (wrapped rows, then an explicit vertical
+        // with a width clamp) still drifted, so nothing here derives an x from
+        // layout any more. Every cell is placed at an x pinned to the panel's
+        // own left edge, captured ONCE before the first tool is drawn. Whatever
+        // was accumulating — measured widths, scrollbar reservation, fractional
+        // rounding under a non-integer zoom factor — cannot accumulate through a
+        // constant.
+        const BTN_W: f32 = 30.0;
+
+        // The tools as DATA, so the column can be laid out arithmetically.
+        // (tool, icon, name, tooltip, keymap id)
+        let tools: [(CanvasTool, &str, &str, &str, &str); 10] = [
+            (CanvasTool::Select, icon::CURSOR, "Select",
+             "Click to select · drag to box-select · ctrl+click to multi-select · right-click for actions.",
+             "tool.select"),
+            (CanvasTool::MarkHealthy, icon::CHECK_CIRCLE, "Mark Healthy",
+             "Stamp a patch straight off the canvas as a HEALTHY training example — teaches the \
+              model this texture is not an anomaly (e.g. a vein it sometimes confuses with necrosis).",
+             "tool.mark_healthy"),
+            (CanvasTool::Brush, icon::PAINT_BRUSH, "Brush",
+             "Paint a freeform region using a cluster's color — extends that cluster's region if the \
+              stroke touches one, or creates a new region otherwise.",
+             "tool.brush"),
+            (CanvasTool::Eraser, icon::ERASER, "Eraser",
+             "Paint over region pixels to remove them — shrinks the region, or removes it entirely \
+              if nothing's left.",
+             "tool.eraser"),
+            (CanvasTool::Knife, icon::KNIFE, "Knife",
+             "Drag a straight line starting and ending OUTSIDE any region to split whatever it \
+              crosses into two. Drag a freeform loop starting INSIDE a region to carve that piece \
+              out on its own.",
+             "tool.knife"),
+            (CanvasTool::Scissor, icon::SCISSORS, "Scissor",
+             "Click to place vertices instead of dragging — precise, deliberate cuts. Click \
+              back on the FIRST vertex to close the loop and carve it out (needs the first click \
+              inside a region); otherwise press Enter to cut along the open polyline like a bent knife.",
+             "tool.scissor"),
+            (CanvasTool::Lasso, icon::LASSO, "Lasso select",
+             "Drag a freeform outline; every region whose center falls inside it is added to the \
+              selection (feeds the same Confirm/Reject/Reassign actions as box-select).",
+             "tool.lasso"),
+            (CanvasTool::Wand, icon::MAGIC_WAND, "Wand",
+             "Click a pixel to grow a mask outward by color similarity (shift-click adds another \
+              blob) — review the pending selection, then \"Fill\" to label + commit it, or \"Clear\" \
+              to discard. A fast alternative to hand-painting with the Brush.",
+             "tool.wand"),
+            (CanvasTool::Eyedropper, icon::EYEDROPPER, "Eyedropper",
+             "Hover a region to see its cluster, area, and review status — read-only, doesn't select anything.",
+             "tool.eyedropper"),
+            (CanvasTool::Polygon, icon::POLYGON, "Polygon",
+             "Click to place nodes, click the first node again to close the shape and fill it. \
+              With a region selected, it extends that region's own cluster; with nothing \
+              selected, you'll be asked which cluster to assign.",
+             "tool.polygon"),
+        ];
+
+        // ONE allocation for the whole column, then every cell's rect is
+        // `top + i * CELL.y`. No per-cell allocation, no `ui.put` (which
+        // allocates its rect in the parent and so fought the cursor this code
+        // had already advanced), no measured widths anywhere — the position of
+        // tool i does not depend on tool i-1 at all, so nothing can accumulate.
+        let (col, _) = ui.allocate_exact_size(
+            egui::vec2(CELL.x, CELL.y * tools.len() as f32),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter().clone();
+        for (i, (tool, ic, name, tip, key_id)) in tools.iter().enumerate() {
+            let active = self.canvas_tool == *tool;
+            let key = shortcuts::key_label(self.keymap.key(key_id));
+            let btn = egui::Rect::from_min_size(
+                egui::pos2(
+                    (col.left() + (CELL.x - BTN_W) / 2.0).round(),
+                    (col.top() + CELL.y * i as f32).round(),
+                ),
+                egui::vec2(BTN_W, BTN_H),
+            );
+            let resp = ui
+                .interact(btn, ui.id().with(("tool", i)), egui::Sense::click())
+                .on_hover_text(format!("{name}  ({key})\n{tip}"));
+
+            // Painted by hand rather than via `Button`, so the visuals follow
+            // the rect instead of the rect following the widget.
+            let vis = ui.style().interact(&resp);
+            let (fill, fg) = if active {
+                (ui_kit::ACCENT(), ui_kit::on_accent())
             } else {
-                egui::Button::new(text)
+                (vis.bg_fill, vis.fg_stroke.color)
             };
-            if ui.add_sized([30.0, 28.0], btn).on_hover_text(format!("{name}\n{tip}")).clicked()
-                && *cur != tool
-            {
-                *cur = tool;
-                *switched = Some(tool);
+            painter.rect(btn, egui::Rounding::same(5.0), fill, vis.bg_stroke);
+            painter.text(btn.center(), egui::Align2::CENTER_CENTER, ic,
+                         egui::FontId::proportional(15.0), fg);
+            painter.text(
+                egui::pos2(btn.center().x, btn.bottom() + LABEL_GAP),
+                egui::Align2::CENTER_TOP,
+                key,
+                // 8.5px was under the 9px floor the type scale sets for Small,
+                // which exists because smaller is not reliably readable.
+                egui::FontId::proportional(9.5),
+                if active { ui_kit::ACCENT() } else { ui_kit::MUTED() },
+            );
+            if resp.clicked() && self.canvas_tool != *tool {
+                self.canvas_tool = *tool;
+                switched_to = Some(*tool);
             }
-        };
-        ui.horizontal_wrapped(|ui| {
-            tool_btn(ui, CanvasTool::Select, icon::CURSOR, "Select",
-                "Click to select · drag to box-select · ctrl+click to multi-select · right-click for actions.",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::MarkHealthy, icon::CHECK_CIRCLE, "Mark Healthy",
-                "Stamp a patch straight off the canvas as a HEALTHY training example — teaches the \
-                 model this texture is not an anomaly (e.g. a vein it sometimes confuses with necrosis).",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Brush, icon::PAINT_BRUSH, "Brush",
-                "Paint a freeform region using a cluster's color — extends that cluster's region if the \
-                 stroke touches one, or creates a new region otherwise.",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Eraser, icon::ERASER, "Eraser",
-                "Paint over region pixels to remove them — shrinks the region, or removes it entirely \
-                 if nothing's left.",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Knife, icon::KNIFE, "Knife",
-                "Drag a straight line starting and ending OUTSIDE any region to split whatever it \
-                 crosses into two. Drag a freeform loop starting INSIDE a region to carve that piece \
-                 out on its own.",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Scissor, icon::SCISSORS, "Scissor",
-                "Click to place vertices instead of dragging — precise, deliberate cuts. Click \
-                 back on the FIRST vertex to close the loop and carve it out (needs the first click \
-                 inside a region); otherwise press Enter to cut along the open polyline like a bent knife.",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Lasso, icon::LASSO, "Lasso select",
-                "Drag a freeform outline; every region whose center falls inside it is added to the \
-                 selection (feeds the same Confirm/Reject/Reassign actions as box-select).",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Wand, icon::MAGIC_WAND, "Wand",
-                "Click a pixel to grow a mask outward by color similarity (shift-click adds another \
-                 blob) — review the pending selection, then \"Fill\" to label + commit it, or \"Clear\" \
-                 to discard. A fast alternative to hand-painting with the Brush.",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Eyedropper, icon::EYEDROPPER, "Eyedropper",
-                "Hover a region to see its cluster, area, and review status — read-only, doesn't select anything.",
-                &mut self.canvas_tool, &mut switched_to);
-            tool_btn(ui, CanvasTool::Polygon, icon::POLYGON, "Polygon",
-                "Click to place nodes, click the first node again to close the shape and fill it. \
-                 With a region selected, it extends that region's own cluster; with nothing \
-                 selected, you'll be asked which cluster to assign.",
-                &mut self.canvas_tool, &mut switched_to);
-        });
+        }
 
         if let Some(tool) = switched_to {
             self.on_tool_switched(tool);
         }
+    }
 
-        // ── active tool's own options, directly below its icon — per
-        // feedback, NOT a separate bar above the canvas ──
-        ui.add_space(4.0);
+    /// The active tool's own settings (brush size, stamp label, wand tolerance…),
+    /// plus zoom.
+    ///
+    /// Split out of `show_toolbox` when the tools moved into a 52px rail: these
+    /// are wide, wordy controls and rendering them in a 52px column wrapped the
+    /// help text to roughly one word per line. They now sit above the canvas,
+    /// where there is room and where they are still visible when the settings
+    /// column is collapsed — a Brush with no reachable size control would be
+    /// useless.
+    fn show_tool_options(&mut self, ui: &mut Ui) {
+        ui.add_space(2.0);
+        // Theme-derived, not a hardcoded near-black: from_gray(28) painted a black
+        // rectangle in the middle of a LIGHT panel, with grey helper text inside
+        // it — the most obviously broken thing a student picking a light theme
+        // would see. `faint_bg_color` is the theme's own "slightly inset surface"
+        // and reads correctly on both polarities.
+        let opts_bg = ui.visuals().faint_bg_color;
         egui::Frame::none()
-            .fill(Color32::from_gray(28))
+            .fill(opts_bg)
             .inner_margin(egui::Margin::same(6.0))
             .rounding(egui::Rounding::same(3.0))
             .show(ui, |ui| {
@@ -910,7 +1685,7 @@ impl PipelineTab {
                             .and_then(|i| self.hardneg_stamps.get(&i))
                             .map(|v| v.len()).unwrap_or(0);
                         ui.add_enabled_ui(cur_stamps > 0, |ui| {
-                            if ui.small_button(format!("↩ Undo ({cur_stamps})"))
+                            if ui.small_button(format!("Undo ({cur_stamps})"))
                                 .on_hover_text("Undo the last stamp on this leaf.")
                                 .clicked()
                             {
@@ -1020,7 +1795,7 @@ impl PipelineTab {
                     }
                     CanvasTool::Eyedropper => {
                         let txt = self.inspect_info.clone().unwrap_or_else(|| "hover a region…".to_string());
-                        ui.label(RichText::new(txt).small().color(ui_kit::ACCENT));
+                        ui.label(RichText::new(txt).small().color(ui_kit::ACCENT()));
                     }
                     CanvasTool::Polygon => {
                         ui.label(RichText::new(
@@ -1030,43 +1805,710 @@ impl PipelineTab {
                 }
             });
 
-        // ── view controls: zoom is a universal capability now (scroll to
-        // zoom, hold middle-mouse to pan — works regardless of active tool),
-        // not a tool you switch into. Grouped here with the reconstruction
-        // preview toggle since both are "how the canvas is displayed," not
-        // an interaction mode. ──
-        ui.add_space(4.0);
-        ui_kit::section_header(ui, "View");
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Zoom {:.0}%", self.canvas_zoom * 100.0)).small());
-            if ui.small_button("Fit").on_hover_text("Reset zoom/pan (scroll to zoom, hold middle-mouse to pan).").clicked() {
-                self.canvas_zoom = 1.0;
-                self.canvas_pan = egui::Vec2::ZERO;
-            }
-        });
     }
 
-    fn show_stepper(&self, ui: &mut Ui) {
+    /// Which of the four real phases the worker is in, from the stage string it
+    /// actually sends.
+    ///
+    /// The old five-step bar was `["Segment","Tile","Detect","Restitch","Done"]`
+    /// matched with `stage.starts_with(step)` — but the worker never emits a
+    /// stage beginning "Tile" or "Restitch", so two of five steps could NEVER
+    /// light. Worse, "Loading models", "Reconstruct", "Morphology" and
+    /// "Clustering" matched nothing at all, so during those every step rendered
+    /// grey. Clustering runs after the last image, over the whole batch, which
+    /// meant the end of a long run showed a frozen bar, an all-grey stepper and a
+    /// spinner — indistinguishable from a hang, at exactly the point where
+    /// killing the run is most expensive.
+    fn current_phase(&self) -> usize {
+        let s = self.stage.as_str();
+        if s.is_empty() { return 0; }
+        if s == "Done" { return 3; }
+        if s.starts_with("Clustering") { return 2; }
+        if s.starts_with("Detect") || s.starts_with("Reconstruct") || s.starts_with("Morphology") {
+            return 1;
+        }
+        0 // Loading models, Leaf … (pre-cut), Segment …
+    }
+
+    fn show_stepper(&mut self, ui: &mut Ui) {
+        // Numbered pills with a completion tick, as in the mockup. The stage bar
+        // is the app's answer to "where am I and what is left", so it should read
+        // as a route rather than as four grey words.
+        const PHASES: [&str; 4] = ["Leaves", "Detect", "Review", "Export"];
+        let phase = self.current_phase();
+        let done_all = !self.results.is_empty() && !self.running;
         ui.horizontal_centered(|ui| {
-            let steps = ["Segment", "Tile", "Detect", "Restitch", "Done"];
-            for (i, s) in steps.iter().enumerate() {
-                let active = self.stage.starts_with(s) || (self.stage == "Done" && i == steps.len() - 1);
-                let col = if active { Color32::from_rgb(120, 200, 130) } else { Color32::GRAY };
-                ui.label(RichText::new(*s).color(col).strong());
-                if i < steps.len() - 1 {
-                    ui.label(RichText::new(">").color(Color32::DARK_GRAY));
+            ui.add_space(4.0);
+            for (i, s) in PHASES.iter().enumerate() {
+                // "Review" and "Export" are reachable once there are results;
+                // the first two describe work the worker does, not places to go.
+                let complete = i < phase || (done_all && i < 2);
+                let current = i == phase && (self.running || done_all);
+                let (fg, bg) = if current {
+                    (ui_kit::on_accent(), ui_kit::ACCENT())
+                } else if complete {
+                    (ui_kit::ACCENT(), ui_kit::ACCENT().linear_multiply(0.14))
+                } else {
+                    (ui_kit::MUTED(), Color32::TRANSPARENT)
+                };
+                let text = if complete && !current {
+                    format!("{}  {s}", i + 1)
+                } else {
+                    format!("{}  {s}", i + 1)
+                };
+                let galley = ui.painter().layout_no_wrap(
+                    text.clone(), egui::FontId::proportional(12.5), fg);
+                let tick_w = if complete { 16.0 } else { 0.0 };
+                let size = egui::vec2(galley.size().x + 22.0 + tick_w, 23.0);
+                let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+                if bg != Color32::TRANSPARENT {
+                    ui.painter().rect_filled(rect, 11.0, bg);
+                }
+                ui.painter().galley(
+                    egui::pos2(rect.center().x - galley.size().x / 2.0,
+                               rect.center().y - galley.size().y / 2.0),
+                    galley, fg);
+                if complete {
+                    // drawn tick, not a glyph — U+2713 is not in the bundled fonts
+                    let c = egui::pos2(rect.right() - 9.0, rect.center().y);
+                    let st = egui::Stroke::new(1.6, fg);
+                    ui.painter().line_segment([c + egui::vec2(-3.0, 0.0), c + egui::vec2(-1.0, 2.5)], st);
+                    ui.painter().line_segment([c + egui::vec2(-1.0, 2.5), c + egui::vec2(3.0, -3.0)], st);
+                }
+                if resp.clicked() {
+                    match i {
+                        0 => self.setup_open = true,
+                        2 => self.stage_view = StageView::Review,
+                        3 => self.stage_view = StageView::Done,
+                        _ => {}
+                    }
+                }
+                let _ = resp.on_hover_text(match i {
+                    0 => "Choose the photographs and where results go.",
+                    1 => "Segment and detect — runs automatically.",
+                    2 => "Judge the detections. You are here for most of the batch.",
+                    _ => "Write results.csv and the images.",
+                });
+                if i < PHASES.len() - 1 {
+                    ui.add_space(2.0);
                 }
             }
             if !self.stage.is_empty() {
                 ui.separator();
-                ui.label(RichText::new(&self.stage).small().color(Color32::GRAY));
+                ui.label(RichText::new(&self.stage).small().color(ui_kit::MUTED()));
+            }
+            // Throughput and remaining time, right-aligned. "How long is this
+            // going to take" is the single most-wanted number during a
+            // multi-hour batch and appeared nowhere in the app.
+            if self.running {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    if let Some(eta) = self.eta_text() {
+                        ui.label(RichText::new(eta).text_style(ui_kit::numeric()).color(ui_kit::MUTED()));
+                    }
+                });
             }
         });
     }
 
-    fn show_controls(&mut self, ui: &mut Ui) {
-        self.show_toolbox(ui);
+    /// The region indices the Curate gallery is currently showing, in the order
+    /// it shows them. Extracted so keyboard stepping and the grid cannot disagree
+    /// about what "next" means.
+    fn gallery_order(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.regions.len())
+            .filter(|&i| {
+                self.region_visible(i)
+                    && self.selected_cluster.map_or(true, |c| self.labels[i] == c)
+                    && (!self.filter_leaf_only
+                        || self.selected_idx.map_or(true, |li| self.regions[i].leaf == li))
+                    && (!self.filter_flagged || self.flagged.contains(&i))
+            })
+            .collect();
+        match self.gallery_sort {
+            GallerySort::Largest => {
+                v.sort_by_key(|&i| std::cmp::Reverse(self.region_area.get(i).copied().unwrap_or(0)));
+            }
+            GallerySort::Unusual => {
+                let score = self.atypicality();
+                v.sort_by(|&a, &b| {
+                    score.get(&b).unwrap_or(&0.0)
+                        .partial_cmp(score.get(&a).unwrap_or(&0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+        v
+    }
+
+    /// Regions the "Rank by appearance" action would embed: the focused family,
+    /// narrowed to the current leaf when the leaf filter is on.
+    ///
+    /// Already-embedded regions are excluded, so pressing it twice costs nothing
+    /// and it can be used to top up after new regions appear.
+    fn rank_targets(&self) -> Vec<usize> {
+        let Some(cid) = self.selected_cluster else { return Vec::new() };
+        (0..self.regions.len())
+            .filter(|&i| {
+                self.region_visible(i)
+                    && self.labels[i] == cid
+                    && self.regions[i].dino_embed.is_empty()
+                    && (!self.filter_leaf_only
+                        || self.selected_idx.map_or(true, |li| self.regions[i].leaf == li))
+            })
+            .collect()
+    }
+
+    fn start_rank_appearance(&mut self, toasts: &mut ToastManager) {
+        let Some(dino) = self.eff_dino() else {
+            toasts.error("Set the DINO model first.");
+            return;
+        };
+        let targets = self.rank_targets();
+        if targets.is_empty() {
+            toasts.info("Nothing to rank — this family is already embedded.");
+            return;
+        }
+        // Group by leaf so each leaf's pixel buffer crosses the thread boundary
+        // once instead of once per region.
+        let mut by_leaf: HashMap<usize, Vec<RankRegion>> = HashMap::new();
+        for i in targets {
+            let r = &self.regions[i];
+            by_leaf.entry(r.leaf).or_default().push(RankRegion {
+                idx: i,
+                centroid: region_centroid(r),
+                bbox_leaf: r.bbox_leaf,
+                mask: r.mask.clone(),
+            });
+        }
+        let leaves: Vec<RankLeaf> = by_leaf.into_iter()
+            .filter_map(|(li, regions)| {
+                let l = self.results.get(li)?;
+                Some(RankLeaf { rgba: l.rgba.clone(), w: l.w, h: l.h, regions })
+            })
+            .collect();
+        let total: usize = leaves.iter().map(|l| l.regions.len()).sum();
+
+        let (tx, rx) = mpsc::channel();
+        self.rank_rx = Some(rx);
+        self.rank_cancel = Arc::new(AtomicBool::new(false));
+        self.ranking = true;
+        self.rank_done = 0;
+        self.rank_total = total;
+        spawn_rank(dino, 512, leaves, tx, self.rank_cancel.clone());
+    }
+
+    fn poll_rank(&mut self, toasts: &mut ToastManager) {
+        let msgs: Vec<RankMsg> = match &self.rank_rx {
+            Some(rx) => rx.try_iter().collect(),
+            None => return,
+        };
+        for m in msgs {
+            match m {
+                RankMsg::Progress { done, total } => {
+                    self.rank_done = done;
+                    self.rank_total = total;
+                }
+                RankMsg::Done(pairs) => {
+                    let n = pairs.len();
+                    for (i, e) in pairs {
+                        if let Some(r) = self.regions.get_mut(i) {
+                            r.dino_embed = e;
+                        }
+                    }
+                    self.ranking = false;
+                    self.rank_rx = None;
+                    // Switch the gallery to the ordering this just made possible,
+                    // otherwise the work is invisible.
+                    self.gallery_sort = GallerySort::Unusual;
+                    self.gallery_page = 0;
+                    toasts.success(format!(
+                        "Ranked {n} regions by appearance — the least typical are now first."
+                    ));
+                }
+                RankMsg::Error(e) => {
+                    self.ranking = false;
+                    self.rank_rx = None;
+                    toasts.error(format!("Appearance ranking failed: {e}"));
+                }
+            }
+        }
+    }
+
+    /// How unlike its own family each visible region is, 0 = typical.
+    ///
+    /// Uses the mask-aware DINO embedding when the run computed one
+    /// (`unsupervised_families`): cosine distance from the family's centroid,
+    /// which is a real measure of "this doesn't look like its siblings".
+    ///
+    /// Falls back to relative area otherwise — a much weaker signal, but the
+    /// embeddings are only populated on one code path and an ordering that
+    /// silently does nothing would be worse than an honest approximation. The UI
+    /// says which one is in force.
+    fn atypicality(&self) -> HashMap<usize, f32> {
+        let mut out = HashMap::new();
+        let have_embeds = self.regions.iter().any(|r| !r.dino_embed.is_empty());
+
+        if have_embeds {
+            // family centroid over the regions that have an embedding
+            let mut sums: HashMap<i32, (Vec<f32>, usize)> = HashMap::new();
+            for (i, r) in self.regions.iter().enumerate() {
+                if r.dino_embed.is_empty() || !self.region_visible(i) { continue; }
+                let e = sums.entry(self.labels[i]).or_insert_with(|| (vec![0.0; r.dino_embed.len()], 0));
+                for (s, v) in e.0.iter_mut().zip(&r.dino_embed) { *s += *v; }
+                e.1 += 1;
+            }
+            for (i, r) in self.regions.iter().enumerate() {
+                if r.dino_embed.is_empty() || !self.region_visible(i) { continue; }
+                let Some((sum, n)) = sums.get(&self.labels[i]) else { continue };
+                if *n == 0 { continue; }
+                // Embeddings are L2-normalized, so a dot with the (unnormalized)
+                // mean is monotone in cosine similarity — enough for ordering.
+                let dot: f32 = sum.iter().zip(&r.dino_embed).map(|(a, b)| a * b).sum();
+                let norm = (sum.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-6);
+                out.insert(i, 1.0 - dot / norm);
+            }
+            return out;
+        }
+
+        // fallback: distance from the family's median area, in relative terms
+        let mut by_fam: HashMap<i32, Vec<u32>> = HashMap::new();
+        for i in 0..self.regions.len() {
+            if !self.region_visible(i) { continue; }
+            by_fam.entry(self.labels[i]).or_default().push(self.region_area.get(i).copied().unwrap_or(0));
+        }
+        let med: HashMap<i32, f32> = by_fam.into_iter().map(|(k, mut v)| {
+            v.sort_unstable();
+            (k, v[v.len() / 2].max(1) as f32)
+        }).collect();
+        for i in 0..self.regions.len() {
+            if !self.region_visible(i) { continue; }
+            let a = self.region_area.get(i).copied().unwrap_or(0) as f32;
+            let m = med.get(&self.labels[i]).copied().unwrap_or(1.0);
+            out.insert(i, ((a / m).max(m / a.max(1.0)) - 1.0).max(0.0));
+        }
+        out
+    }
+
+    /// What the app's bottom strip should say while this tab is open.
+    ///
+    /// Answers the questions a long session actually raises — where am I, how much
+    /// is left, is my work saved — instead of repeating the tab's own title.
+    pub fn status_line(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.results.is_empty() {
+            out.push(if self.running { "Running…".into() } else { "No run loaded".into() });
+        } else {
+            let (rev, rej, tot) = self.review_counts();
+            let left = tot.saturating_sub(rev + rej);
+            out.push(format!("{tot} leaves"));
+            out.push(format!("{rev} reviewed · {rej} rejected · {left} to go"));
+            if let Some(i) = self.selected_idx {
+                out.push(format!("on leaf {}", i + 1));
+            }
+        }
+        if self.running {
+            if let Some(e) = self.eta_text() { out.push(e); }
+        }
+        if self.retraining { out.push("retraining".into()); }
+        if self.mining     { out.push("mining".into()); }
+        if self.ranking    { out.push(format!("ranking {}/{}", self.rank_done, self.rank_total)); }
+        if let Some(j) = &self.export_job {
+            let done = j.crop_cur + j.leaf_cur;
+            out.push(format!("exporting images {done}/{}", j.total));
+        }
+        // Review marks and curations are written the moment they happen, so this
+        // is a statement of fact rather than a save button's absence.
+        if self.output_folder.is_some() && !self.results.is_empty() {
+            out.push("saved".into());
+        }
+        out
+    }
+
+    /// "1,204 / 10,000 · 8.4/min · ~17 min left", or `None` before there is
+    /// enough history to say anything honest.
+    fn eta_text(&self) -> Option<String> {
+        let started = self.run_started_at?;
+        let done = self.progress_done;
+        let total = self.progress_total;
+        if done < 3 || total == 0 {
+            // Deliberately silent rather than wrong: an estimate from one or two
+            // images swings wildly and then "corrects" by minutes, which reads as
+            // the app being confused.
+            return Some(format!("{done} / {total}"));
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        if elapsed <= 0.0 { return None; }
+        let per = elapsed / done as f64;
+        let remaining = per * (total.saturating_sub(done)) as f64;
+        Some(format!(
+            "{done} / {total} · {:.1}/min · ~{} left",
+            60.0 / per.max(1e-6),
+            humanize_secs(remaining),
+        ))
+    }
+
+    /// Shown in place of everything else until the app can actually run.
+    ///
+    /// The first thing a new user met was a greyed-out "Run Pipeline", one line of
+    /// grey text naming missing files, and no visible way to supply them — the
+    /// pickers live in Settings → Pipeline, on a different screen, with nothing
+    /// linking there. That is a dead end at step one, and it is probably the
+    /// single largest contributor to "the workflow is not intuitive".
+    ///
+    /// Returns true when it took over the panel.
+    fn show_setup_card(&mut self, ui: &mut Ui) -> bool {
+        let missing_models = !self.all_paths_ok();
+        let missing_folders = self.source_folder.is_none() || self.output_folder.is_none();
+        if !missing_models && !missing_folders {
+            return false;
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("Start an analysis").text_style(ui_kit::subhead()).strong());
+        ui.label(RichText::new(
+            "Choose a folder of photographs. Everything else has a working default.")
+            .small().color(ui_kit::MUTED()));
+        ui.add_space(10.0);
+
+        // ── one decision ────────────────────────────────────────────────────
+        // Picking a source folder derives the output folder beside it, so the
+        // common case is a single choice rather than two. Asking for an output
+        // location is a question with an obvious answer, and questions with
+        // obvious answers are the ones worth not asking.
+        if ui_kit::primary_button(ui, "Choose a folder of photographs…").clicked() {
+            if self.pick_rx.is_none() {
+                self.pick_rx = Some((Pick::Source, spawn_dialog(Pick::Source)));
+            }
+        }
+        if let Some(src) = self.source_folder.clone() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(src.display().to_string()).small().color(ui_kit::MUTED()));
+            ui.label(
+                RichText::new(format!("{} images found (including sub-folders)", self.source_count))
+                    .small()
+                    .color(if self.source_count > 0 { ui_kit::ACCENT() } else { Color32::from_rgb(220, 150, 130) }),
+            );
+            if self.output_folder.is_none() {
+                if let Some(derived) = derived_output_for(&src) {
+                    self.output_folder = Some(derived);
+                }
+            }
+        }
+        if let Some(out) = self.output_folder.clone() {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Results").small().color(ui_kit::MUTED()));
+                if ui.small_button("change")
+                    .on_hover_text("Put the results somewhere else. By default they go in a \
+                                    folder beside the photographs.")
+                    .clicked()
+                {
+                    if self.pick_rx.is_none() {
+                        self.pick_rx = Some((Pick::Output, spawn_dialog(Pick::Output)));
+                    }
+                }
+            });
+            ui.label(RichText::new(out.display().to_string()).small().color(ui_kit::MUTED()));
+        }
+        ui.add_space(10.0);
         ui.separator();
+        ui.add_space(6.0);
+
+        // Models: normally already resolved from the bundled folder, so this only
+        // becomes visible when something is genuinely missing. It used to be the
+        // blocking step with its pickers on a different screen entirely.
+        if missing_models {
+            ui.label(RichText::new("Models").strong());
+            ui.label(RichText::new(
+                "Normally filled in automatically from the models/ folder next to \
+                 Lacuna. Set whichever is missing:")
+                .small().color(ui_kit::MUTED()));
+            self.pick_row(ui, "Leaf segmentation (YOLO)", Pick::Yolo);
+            self.pick_row(ui, "Features (DINO)", Pick::Dino);
+            self.pick_row(ui, "Anomaly classifier (head)", Pick::Head);
+            ui.add_space(8.0);
+        }
+
+        // The green button the mockup calls for: it lights up the moment the
+        // folder has images, and states what it is about to do.
+        let ready = self.source_count > 0 && !missing_models
+            && self.output_folder.is_some() && self.output_inside_source().is_none();
+        ui.add_enabled_ui(ready && !self.running, |ui| {
+            if ui_kit::primary_button(ui, &format!("Analyse {} photographs", self.source_count)).clicked() {
+                self.start();
+            }
+        });
+        if !ready {
+            ui.label(RichText::new(if self.source_folder.is_none() {
+                "Choose a folder to begin."
+            } else if self.source_count == 0 {
+                "No images in that folder — pick another."
+            } else if missing_models {
+                "One or more models still need setting."
+            } else {
+                "Output folder overlaps the source folder — choose another."
+            }).small().color(ui_kit::MUTED()));
+        }
+        true
+    }
+
+    /// Does the active tool have anything to configure? Select, Knife, Scissor
+    /// and Polygon do not, and a popover that appears empty is worse than none.
+    fn tool_has_options(&self) -> bool {
+        matches!(
+            self.canvas_tool,
+            CanvasTool::MarkHealthy | CanvasTool::Brush | CanvasTool::Eraser | CanvasTool::Wand
+        )
+    }
+
+    fn show_tool_options_popover(&mut self, ctx: &Context) {
+        if !self.tool_has_options() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("tool_options_popover"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(58.0, 104.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.set_max_width(230.0);
+                        let name = match self.canvas_tool {
+                            CanvasTool::MarkHealthy => "Mark healthy",
+                            CanvasTool::Brush       => "Brush",
+                            CanvasTool::Eraser      => "Eraser",
+                            CanvasTool::Wand        => "Magic wand",
+                            _ => "Tool",
+                        };
+                        ui.label(RichText::new(name).small().strong().color(ui_kit::MUTED()));
+                        ui.add_space(2.0);
+                        self.show_tool_options(ui);
+                    });
+            });
+    }
+
+    /// The finish screen — the mockup's fourth stage.
+    ///
+    /// Every task needs an unambiguous ending; a review session that just trails
+    /// off leaves you unsure whether you finished. This states what happened,
+    /// offers the export, and makes the one worthwhile follow-on — teaching the
+    /// model from your corrections — an offer rather than a control panel.
+    fn show_done_screen(&mut self, ui: &mut Ui, toasts: &mut ToastManager) {
+        let (rev, rej, tot) = self.review_counts();
+        let confirmed = self.persisted.len();
+        let aside = self.flagged.len();
+        let corrections = self.removed.len();
+        let agree = if confirmed + corrections > 0 {
+            100.0 * confirmed as f32 / (confirmed + corrections) as f32
+        } else { 0.0 };
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("Review complete").text_style(ui_kit::display()).strong());
+        ui.add_space(12.0);
+
+        let stat = |ui: &mut Ui, v: String, k: &str, col: Color32| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(v).text_style(ui_kit::numeric()).size(22.0).color(col));
+                ui.label(RichText::new(k).small().color(ui_kit::MUTED()));
+            });
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 26.0;
+            stat(ui, fmt_thousands(tot), "leaves", ui.visuals().text_color());
+            stat(ui, fmt_thousands(rev), "reviewed", ui.visuals().text_color());
+            stat(ui, fmt_thousands(rej), "rejected", Color32::from_rgb(212, 121, 74));
+            stat(ui, fmt_thousands(confirmed), "confirmed", ui.visuals().text_color());
+            if confirmed + corrections > 0 {
+                stat(ui, format!("{agree:.1}%"), "model agreed", ui_kit::ACCENT());
+            }
+            if aside > 0 {
+                stat(ui, fmt_thousands(aside), "set aside", Color32::from_rgb(225, 180, 90));
+            }
+        });
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // Read the counters out before the closure — borrowing `export_job` while
+        // the closure also wants to clear it is a unique-access conflict.
+        let job = self.export_job.as_ref().map(|j| (j.crop_cur + j.leaf_cur, j.total));
+        if let Some((done, total_imgs)) = job {
+            let mut stop = false;
+            ui.horizontal(|ui| {
+                ui_kit::busy(ui, &format!("writing images {done}/{total_imgs}"));
+                // Export CAN be cancelled now. The CSV is already down, so
+                // stopping costs only images.
+                if ui.button("Stop").clicked() {
+                    stop = true;
+                }
+            });
+            ui.add(egui::ProgressBar::new(done as f32 / total_imgs.max(1) as f32)
+                .desired_height(5.0));
+            if stop {
+                self.export_job = None;
+                toasts.info("Stopped — results.csv was already written.");
+            }
+        } else if ui_kit::primary_button(ui, "Export measurements").clicked() {
+            self.export_results(toasts);
+        }
+        ui.label(RichText::new(
+            "results.csv, plus the images you ticked under Export. A provenance \
+             line records the model, thresholds and which rows you verified.")
+            .small().color(ui_kit::MUTED()));
+
+        // Table shape. Placed with the export controls rather than in settings
+        // because it changes what the file IS, and that is a decision made at
+        // the moment of writing it.
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Table shape").small().color(ui_kit::MUTED()));
+            ui.selectable_value(&mut self.export_wide, false, "Long")
+                .on_hover_text("ONE ROW PER ANOMALY.\n\n\
+                                Every region with its own area, bounding box, recon % \
+                                and family, with the leaf's morphology repeated on each \
+                                row. Use when the anomaly is the unit of analysis, or \
+                                when you want to filter/aggregate yourself.");
+            ui.selectable_value(&mut self.export_wide, true, "Wide")
+                .on_hover_text("ONE ROW PER LEAF.\n\n\
+                                Leaf morphology once, plus four columns per family: \
+                                count, total area, average area and % of leaf. Use when \
+                                the leaf is the sampling unit — this is the shape that \
+                                joins directly to per-leaf field data with no pivot.");
+        });
+        if self.export_wide {
+            let fams = self.clusters.iter().filter(|c| c.id >= 0).count();
+            ui.label(RichText::new(format!(
+                "{} families x 4 columns. A family with no regions on a leaf gets 0 \
+                 counts and a blank average.", fams))
+                .small().color(ui_kit::MUTED()));
+        }
+
+        // The way BACK. The stage pill was the only route to review from here,
+        // and a pill in a header does not read as a control — the finish screen
+        // looked like a one-way door.
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            // No arrow glyph: U+2190 is not in the bundled fonts and rendered as
+            // a tofu box. Same reason the stage pills draw their tick by hand.
+            if ui.button("Back to review").clicked() {
+                self.stage_view = StageView::Review;
+            }
+            if aside > 0 && ui.button(format!("Review the {aside} set aside")).clicked() {
+                self.stage_view = StageView::Review;
+                self.filter_flagged = true;
+                self.gallery_page = 0;
+            }
+        });
+
+        // Export options live here too — the Done screen is where someone decides
+        // what to write, so making them go back to the review panel for the two
+        // checkboxes that change what lands on disk is a pointless round trip.
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.export_crops, "Anomaly crops")
+                .on_hover_text("One small PNG per anomaly, into export/crops/.\n\n\
+                                OFF by default: the CSV row and the leaf overlay already \
+                                describe every region. Tick it only if you specifically need \
+                                the individual crop images.");
+            ui.checkbox(&mut self.export_overlays, "Leaf overlays")
+                .on_hover_text("One FULL-SIZE PNG per leaf into export/leaves/, with every \
+                                anomaly painted in its family colour.\n\n\
+                                This is usually the most expensive part of an export — a \
+                                10,000-leaf batch means 10,000 full-resolution encodes. Turn \
+                                it off when you only need results.csv.");
+        });
+        // The export runs on the UI thread, so a big one freezes the window. Say
+        // so rather than letting it look like a hang.
+        let n_leaves = self.results.len().saturating_sub(self.rejected_leaves.len());
+        if self.export_overlays && n_leaves > 500 {
+            ui.label(RichText::new(format!(
+                "{n_leaves} overlays to encode — this will take a while and the window \
+                 will not respond until it finishes."
+            )).small().color(Color32::from_rgb(220, 170, 90)));
+        }
+
+        // The flywheel, as one question rather than five controls.
+        if corrections > 0 {
+            ui.add_space(16.0);
+            egui::Frame::none()
+                .fill(ui.visuals().faint_bg_color)
+                .inner_margin(egui::Margin::same(12.0))
+                .rounding(egui::Rounding::same(5.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(format!(
+                        "You corrected the model {} times.", fmt_thousands(corrections)))
+                        .strong());
+                    ui.label(RichText::new(
+                        "Teaching it from those corrections affects future runs only — this \
+                         batch's results are already written.")
+                        .small().color(ui_kit::MUTED()));
+                    ui.add_space(6.0);
+                    // Opens the panel BELOW, in place. It used to bounce you back
+                    // to the review screen with a toast describing where to look,
+                    // which is an instruction where a control belongs.
+                    if ui.button("Teach the model").clicked() {
+                        self.improve_open_req = true;
+                    }
+                });
+        }
+
+        // Retraining lives here and only here — same moment as export, when the
+        // run is done and the question is what to do with it.
+        ui.add_space(14.0);
+        self.show_improve_model(ui);
+    }
+
+    /// The flow screen: the only thing on screen before a run exists.
+    fn show_start_screen(&mut self, ui: &mut Ui) {
+        // `show_setup_card` returns false once everything is configured, in which
+        // case it has drawn nothing — so draw the ready-to-run state instead.
+        if !self.show_setup_card(ui) {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Ready to analyse").text_style(ui_kit::subhead()).strong());
+            ui.add_space(6.0);
+            if let Some(src) = &self.source_folder {
+                ui.label(RichText::new(src.display().to_string()).small().color(ui_kit::MUTED()));
+            }
+            ui.label(RichText::new(format!("{} photographs", self.source_count))
+                .small().color(ui_kit::ACCENT()));
+            ui.add_space(10.0);
+            if ui_kit::primary_button(ui, &format!("Analyse {} photographs", self.source_count)).clicked() {
+                self.start();
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.small_button("Change folders…").clicked() { self.setup_open = true; }
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new(
+                "Results appear as each leaf finishes — you can start reviewing \
+                 before the batch completes.")
+                .small().color(ui_kit::MUTED()));
+        }
+    }
+
+    /// Job configuration, in a window rather than a standing panel.
+    fn show_setup_window(&mut self, ctx: &Context) {
+        if !self.setup_open {
+            return;
+        }
+        let mut open = self.setup_open;
+        egui::Window::new("Run setup")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(360.0)
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(70.0, 96.0))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height(520.0)
+                    .id_salt("setup_scroll")
+                    .show(ui, |ui| self.show_controls_body(ui));
+            });
+        self.setup_open = open;
+    }
+
+    /// Folders, preview, calibration and Run — the content of the setup window.
+    fn show_controls_body(&mut self, ui: &mut Ui) {
         ui_kit::section_header(ui, "Folders");
         self.pick_row(ui, "Source folder", Pick::Source);
         if self.source_folder.is_some() {
@@ -1074,18 +2516,12 @@ impl PipelineTab {
         }
         self.pick_row(ui, "Output folder", Pick::Output);
 
-        // Segmentation edge preview (runs YOLO on the first source image so you can
-        // check the cutout edge before committing to a full pipeline run; tune the
-        // underlying thresholds in Settings > Pipeline).
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let can_preview = self.eff_yolo().is_some() && self.source_count > 0
-                && !self.preview_busy && !self.running;
-            if ui.add_enabled(can_preview, egui::Button::new("🔍 Preview segmentation")).clicked() {
-                self.start_preview();
-            }
-            if self.preview_busy { ui_kit::busy(ui, "segmenting…"); }
-        });
+        // The standalone "Preview segmentation" button was REMOVED. It ran YOLO
+        // on the first source image alone, which is not the pipeline: no tiling,
+        // no margin erode, none of the per-leaf handling — so its cutout did not
+        // resemble what a run actually produces, and its only advice was to tune
+        // sliders that live somewhere else. Calibration below runs the real
+        // detection path on a real leaf and is the thing to use instead.
         if !self.preview_note.is_empty() {
             ui.label(RichText::new(&self.preview_note).small().color(Color32::GRAY));
         }
@@ -1122,6 +2558,9 @@ impl PipelineTab {
                 }
                 if self.calib_running {
                     ui_kit::busy(ui, "calibrating…");
+                    if ui.small_button("Cancel").clicked() {
+                        self.calib_cancel.store(true, Ordering::Relaxed);
+                    }
                 }
             });
             ui.horizontal(|ui| {
@@ -1168,10 +2607,35 @@ impl PipelineTab {
         }
 
         ui.add_space(10.0);
-        let can_start = self.all_paths_ok() && self.source_count > 0 && !self.running && !self.retraining && !self.mining;
+        // Blocking, not advisory: with the output inside the source folder the run
+        // silently corrupts its own input, and the damage compounds every rerun.
+        let folder_clash = self.output_inside_source();
+        if let Some(why) = &folder_clash {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(74, 30, 24))
+                .inner_margin(egui::Margin::same(7.0))
+                .rounding(egui::Rounding::same(4.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Output folder is inside the source folder")
+                        .strong().color(Color32::from_rgb(240, 180, 160)));
+                    ui.label(RichText::new(why).small().color(Color32::from_rgb(228, 196, 186)));
+                });
+            ui.add_space(6.0);
+        }
+        let can_start = self.all_paths_ok() && self.source_count > 0 && !self.running
+            && !self.retraining && !self.mining && folder_clash.is_none();
         ui.add_enabled_ui(can_start, |ui| {
             if ui_kit::primary_button(ui, "Run Pipeline").clicked() {
-                self.start();
+                // Only ask when there is a session to lose. A first run, or one
+                // where nothing has been reviewed, goes straight through — a
+                // dialog that fires when nothing is at stake is how people learn
+                // to click past dialogs that matter.
+                let (rev, rej, _) = self.review_counts();
+                if !self.results.is_empty() && (rev + rej > 0) {
+                    self.pending_reset = Some(PendingReset::Rerun);
+                } else {
+                    self.start();
+                }
             }
         });
         if self.running {
@@ -1467,7 +2931,7 @@ impl PipelineTab {
         }
         let (txt, col) = match (&own, &inherited) {
             (Some(p), _) => (p.display().to_string(), Color32::GRAY),
-            (None, Some(p)) => (format!("inherits: {}", p.display()), ui_kit::ACCENT),
+            (None, Some(p)) => (format!("inherits: {}", p.display()), ui_kit::ACCENT()),
             (None, None) => ("- not set -".to_string(), Color32::GRAY),
         };
         ui.label(RichText::new(txt).small().color(col));
@@ -1490,8 +2954,33 @@ impl PipelineTab {
 
     fn show_gallery(&mut self, ui: &mut Ui, ctx: &Context) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Leaves — {} done", self.results.len()))
-                .small().color(Color32::GRAY));
+            let (rev, rej, tot) = self.review_counts();
+            ui.label(RichText::new(format!("Leaves — {tot} done")).small().color(Color32::GRAY));
+            if tot > 0 {
+                let left = tot.saturating_sub(rev + rej);
+                ui.label(
+                    RichText::new(format!("· {rev} reviewed · {rej} rejected · {left} to go"))
+                        .small()
+                        .color(if left == 0 { ui_kit::ACCENT() } else { Color32::GRAY }),
+                )
+                .on_hover_text(
+                    "Saved to <output>/review_state.jsonl and restored next time you \
+                     run this folder.\n\nM marks the current leaf reviewed · N jumps to \
+                     the next unreviewed one.",
+                );
+            }
+            if self.review_mismatch > 0 {
+                ui.label(
+                    RichText::new(format!("{} stale", self.review_mismatch))
+                        .small().color(Color32::from_rgb(220, 170, 90)),
+                )
+                .on_hover_text(
+                    "Saved review marks were recorded against differently-sized leaves \
+                     — the segmentation model or its settings changed since.\n\nThose \
+                     marks were NOT applied, because a tick on a leaf nobody has seen is \
+                     worse than a missing tick.",
+                );
+            }
             if self.running {
                 ui_kit::busy(ui, "processing…");
             }
@@ -1505,10 +2994,13 @@ impl PipelineTab {
                     let n = self.results[i].n_regions;
                     let Some(tex) = &self.thumbs[i] else { continue };
                     let rejected = self.rejected_leaves.contains(&i);
+                    let reviewed = self.reviewed.contains(&i);
                     let hover = if rejected {
                         format!("leaf {i} — REJECTED ({n} regions excluded)")
+                    } else if reviewed {
+                        format!("leaf {i} — reviewed · {n} regions")
                     } else {
-                        format!("leaf {i} — {n} regions")
+                        format!("leaf {i} — {n} regions · not yet reviewed")
                     };
                     let resp = ui
                         .add(egui::ImageButton::new((tex.id(), tex.size_vec2())))
@@ -1530,6 +3022,26 @@ impl PipelineTab {
                         ui.painter().line_segment(
                             [resp.rect.right_top(), resp.rect.left_bottom()],
                             egui::Stroke::new(2.0, red),
+                        );
+                    }
+                    // Reviewed: dim the tile and tick it, so the strip reads as a
+                    // map of what is left rather than an undifferentiated filmstrip.
+                    // Drawn before the selection ring so selection still wins.
+                    if reviewed && !rejected {
+                        let green = Color32::from_rgb(120, 200, 130);
+                        ui.painter().rect_filled(
+                            resp.rect, 3.0, Color32::from_rgba_unmultiplied(10, 20, 12, 105),
+                        );
+                        // Drawn, not typed: U+2713 is absent from the bundled fonts
+                        // and rendered as a tofu box. The reject cross beside it is
+                        // already two line segments, so this also matches it.
+                        let c = resp.rect.right_bottom() - egui::vec2(9.0, 8.0);
+                        let stroke = egui::Stroke::new(2.0, green);
+                        ui.painter().line_segment(
+                            [c + egui::vec2(-4.0, 0.0), c + egui::vec2(-1.0, 3.5)], stroke,
+                        );
+                        ui.painter().line_segment(
+                            [c + egui::vec2(-1.0, 3.5), c + egui::vec2(5.0, -4.0)], stroke,
                         );
                     }
                     if self.selected_idx == Some(i) {
@@ -1747,18 +3259,6 @@ impl PipelineTab {
     fn show_canvas(&mut self, ui: &mut Ui, ctx: &Context, toasts: &mut ToastManager) {
         self.ensure_overlay(ctx);
         let Some(tex) = self.overlay_tex.clone() else {
-            // Before a run: show the segmentation preview (if any) so the cutout edge
-            // can be judged; otherwise the get-started hint.
-            if let Some(pv) = self.preview_tex.clone() {
-                let avail = ui.available_size();
-                let sz = pv.size_vec2();
-                let scale = (avail.x / sz.x).min(avail.y / sz.y).min(1.0).max(0.01);
-                let disp = sz * scale;
-                let (area, _) = ui.allocate_exact_size(avail, egui::Sense::hover());
-                let rect = egui::Rect::from_center_size(area.center(), disp);
-                egui::Image::new((pv.id(), disp)).paint_at(ui, rect);
-                return;
-            }
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new(
                     "Set the models + folders, then Run Pipeline.\n\
@@ -1809,11 +3309,27 @@ impl PipelineTab {
                     )
                 }).collect();
                 let sm = chaikin(&pts, 2);
-                let col = if focused { cluster_color(self.labels[ri]) } else { dim_color(cluster_color(self.labels[ri])) };
+                let cid = self.labels[ri];
+                let col = if focused { cluster_color(cid) } else { dim_color(cluster_color(cid)) };
                 let width = if focused { 2.0 } else { 1.2 };
-                ui.painter().add(egui::Shape::closed_line(
-                    sm, egui::Stroke::new(width, Color32::from_rgb(col[0], col[1], col[2])),
-                ));
+                let stroke = egui::Stroke::new(width, Color32::from_rgb(col[0], col[1], col[2]));
+                // Dash pattern is the family's SECOND, non-colour cue: it survives
+                // colour blindness, greyscale, and the palette wrapping past eight
+                // families. Scaled by `s` so the dashes keep their on-screen length
+                // as the canvas zooms.
+                match cluster_dash(cid) {
+                    None => ui.painter().add(egui::Shape::closed_line(sm, stroke)),
+                    Some(dash) => {
+                        let d = (dash * s).max(2.0);
+                        let mut closed = sm.clone();
+                        if let Some(&first) = sm.first() {
+                            closed.push(first); // dashed_line does not close for us
+                        }
+                        ui.painter().add(egui::Shape::dashed_line(
+                            &closed, stroke, d, d * 0.75,
+                        ))
+                    }
+                };
             }
         }
 
@@ -2331,19 +3847,22 @@ impl PipelineTab {
         // available regardless of which tool is currently active — guarded
         // by `!focused` so typing in any text field (cluster name, etc.)
         // never accidentally swaps the active tool out from under you.
-        let focused = ctx.memory(|m| m.focused().is_some());
+        // `rebinding` also gates this: while the help overlay is capturing a key,
+        // pressing (say) B to bind it must not simultaneously switch to Brush.
+        let focused = ctx.memory(|m| m.focused().is_some()) || self.rebinding.is_some();
         if !focused {
+            let km = &self.keymap;
             let key_tool = ui.input(|i| {
-                if i.key_pressed(egui::Key::V) { Some(CanvasTool::Select) }
-                else if i.key_pressed(egui::Key::H) { Some(CanvasTool::MarkHealthy) }
-                else if i.key_pressed(egui::Key::B) { Some(CanvasTool::Brush) }
-                else if i.key_pressed(egui::Key::E) { Some(CanvasTool::Eraser) }
-                else if i.key_pressed(egui::Key::K) { Some(CanvasTool::Knife) }
-                else if i.key_pressed(egui::Key::S) { Some(CanvasTool::Scissor) }
-                else if i.key_pressed(egui::Key::L) { Some(CanvasTool::Lasso) }
-                else if i.key_pressed(egui::Key::W) { Some(CanvasTool::Wand) }
-                else if i.key_pressed(egui::Key::I) { Some(CanvasTool::Eyedropper) }
-                else if i.key_pressed(egui::Key::P) { Some(CanvasTool::Polygon) }
+                if km.pressed(i, "tool.select") { Some(CanvasTool::Select) }
+                else if km.pressed(i, "tool.mark_healthy") { Some(CanvasTool::MarkHealthy) }
+                else if km.pressed(i, "tool.brush") { Some(CanvasTool::Brush) }
+                else if km.pressed(i, "tool.eraser") { Some(CanvasTool::Eraser) }
+                else if km.pressed(i, "tool.knife") { Some(CanvasTool::Knife) }
+                else if km.pressed(i, "tool.scissor") { Some(CanvasTool::Scissor) }
+                else if km.pressed(i, "tool.lasso") { Some(CanvasTool::Lasso) }
+                else if km.pressed(i, "tool.wand") { Some(CanvasTool::Wand) }
+                else if km.pressed(i, "tool.eyedropper") { Some(CanvasTool::Eyedropper) }
+                else if km.pressed(i, "tool.polygon") { Some(CanvasTool::Polygon) }
                 else { None }
             });
             if let Some(tool) = key_tool {
@@ -2428,13 +3947,13 @@ impl PipelineTab {
             // keyboard focus, so typing a cluster name never accidentally
             // triggers one of these.
             if !focused && n_sel > 0 {
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if ui.input(|i| self.keymap.pressed(i, "region.confirm")) {
                     do_confirm = true;
                 }
-                if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                if ui.input(|i| self.keymap.pressed(i, "region.reject")) {
                     do_remove = true;
                 }
-                if ui.input(|i| i.key_pressed(egui::Key::R)) {
+                if ui.input(|i| self.keymap.pressed(i, "region.reassign")) {
                     if let Some(pos) = ctx.pointer_hover_pos() {
                         self.quick_reassign_pos = pos;
                     }
@@ -2623,7 +4142,7 @@ impl PipelineTab {
         painter.line_segment([c - egui::vec2(0.0, 7.0), c + egui::vec2(0.0, 7.0)], egui::Stroke::new(1.0, Color32::WHITE));
         let half_t = t * factor;
         painter.rect_stroke(egui::Rect::from_center_size(c, egui::Vec2::splat(half_t)), 0.0,
-            egui::Stroke::new(1.5, ui_kit::ACCENT));
+            egui::Stroke::new(1.5, ui_kit::ACCENT()));
         painter.rect_stroke(lrect.expand(1.5), egui::Rounding::same(3.0), egui::Stroke::new(2.0, Color32::from_gray(235)));
     }
 
@@ -2678,7 +4197,8 @@ impl PipelineTab {
     fn ensure_overlay(&mut self, ctx: &Context) {
         let Some(idx) = self.selected_idx else { return };
         let sel = self.selected_cluster;
-        let key = (idx, sel, self.show_recon, (self.overlay_alpha * 100.0) as u32, self.overlay_outline);
+        let key = (idx, sel, self.show_recon, (self.overlay_alpha * 100.0) as u32,
+                   self.overlay_outline, self.regions.len());
         if self.overlay_key == Some(key) && self.overlay_tex.is_some() {
             return;
         }
@@ -2743,6 +4263,32 @@ impl PipelineTab {
                         px[o + 2] = lerp_u8(px[o + 2], 225, self.overlay_alpha);
                         px[o + 3] = 255;
                     }
+                }
+            }
+        }
+
+        // ── live preview, while the run is still going ──
+        // Clustering only happens once, over every leaf, at the very end — so
+        // until then a finished leaf has no regions and shows nothing, and the
+        // detection you already paid for is invisible until the whole batch is
+        // done. `PipelineLeaf.anomaly` is the restitched per-leaf mask and has
+        // been streaming with every leaf all along (unread until now), so this
+        // costs one extra pass over pixels the worker already computed.
+        //
+        // One flat colour, not family colours: families come from the clustering
+        // that hasn't run yet, and colouring this as if it were final would imply
+        // a classification nothing has made. Painted in BOTH fill and outline
+        // mode, since outline mode draws vector contours from `regions` — which
+        // by definition don't exist during the preview.
+        let previewing = leaf.anomaly.len() == w * h
+            && !self.regions.iter().any(|r| r.leaf == idx);
+        if previewing {
+            for i in 0..w * h {
+                let o = i * 4;
+                if leaf.anomaly[i] && px[o + 3] > 0 {
+                    px[o]     = lerp_u8(px[o],     255, self.overlay_alpha);
+                    px[o + 1] = lerp_u8(px[o + 1], 170, self.overlay_alpha);
+                    px[o + 2] = lerp_u8(px[o + 2],  40, self.overlay_alpha);
                 }
             }
         }
@@ -2843,24 +4389,656 @@ impl PipelineTab {
         ui.separator();
     }
 
+    /// The review panel, arranged the way the work actually goes:
+    /// **this detection → the families → this leaf's detections**, with
+    /// everything else folded away underneath.
+    ///
+    /// It used to be four peer tabs — Metrics, Clusters, Curate, Log — which put
+    /// the surface used ten thousand times a batch behind a tab switch, and gave
+    /// a static seven-row table the same prominence as the review grid. Tabs
+    /// also hid state: with Metrics open you could not see what was selected.
     fn show_cluster_panel(&mut self, ui: &mut Ui, ctx: &Context, toasts: &mut ToastManager) {
-        ui.add_space(4.0);
-        // ── tabs: split what used to be one long scrolling column (leaf/
-        // morphology / stats / curation / retrain / export / log all
-        // stacked) into focused views ──
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.cluster_panel_tab, ClusterPanelTab::Leaf, "Metrics");
-            ui.selectable_value(&mut self.cluster_panel_tab, ClusterPanelTab::Clusters, "Clusters");
-            ui.selectable_value(&mut self.cluster_panel_tab, ClusterPanelTab::Curate, "Curate");
-            ui.selectable_value(&mut self.cluster_panel_tab, ClusterPanelTab::Log, "Log");
-        });
-        ui.separator();
+        if self.regions.is_empty() {
+            ui.add_space(8.0);
+            ui.label(RichText::new(if self.running {
+                "Detecting… anomalies appear here as each leaf finishes."
+            } else {
+                "Run an analysis to review anomalies here."
+            }).small().color(ui_kit::MUTED()));
+            return;
+        }
+        // Measured BEFORE the scroll area: a width read inside a scrollable
+        // parent takes part in that parent's own width negotiation, which is the
+        // loop that made the panel creep wider on every mouse move. Measured out
+        // here it is just a number.
+        let row_w = (ui.available_width() - 14.0).max(180.0);
+        egui::ScrollArea::vertical().id_salt("review_panel").auto_shrink([false, false])
+            // Always reserve the scrollbar. Otherwise selecting a detection adds
+            // the card, content passes the panel height, the bar appears and
+            // everything shifts by its width — the 1-2px jump on first click.
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .show(ui, |ui| {
+            // HARD width cap for everything below.
+            //
+            // `auto_shrink(false)` alone was not enough: a child that asks for
+            // more than the panel has — the detection card's three buttons in a
+            // non-wrapping row — still reports a wider minimum, the resizable
+            // SidePanel grows to satisfy it, and next frame there is more width
+            // to fill. It crept wider on every mouse move until it hit the max
+            // I had set, which is why capping the panel hid the symptom without
+            // removing the cause. Pinning max_width here means no descendant can
+            // ever ask for more than the panel already has.
+            ui.set_max_width(ui.available_width());
+            self.show_selected_detection(ui, toasts);
+            self.show_family_legend(ui, row_w);
+            ui.add_space(6.0);
+            self.show_curate_tab(ui, ctx, toasts);
+            self.show_verdict_block(ui, row_w, toasts);
 
-        match self.cluster_panel_tab {
-            ClusterPanelTab::Leaf => self.show_leaf_tab(ui),
-            ClusterPanelTab::Clusters => self.show_clusters_tab(ui, toasts),
-            ClusterPanelTab::Curate => self.show_curate_tab(ui, ctx, toasts),
-            ClusterPanelTab::Log => self.show_log_tab(ui),
+            ui.add_space(10.0);
+            // The way OUT of review. "Improve the model" and "Export" used to sit
+            // here as two collapsed headers; they are decisions about what to do
+            // with a finished run, so they belong on the Done screen and nowhere
+            // else. What review needs at this point is not machinery but an exit,
+            // and the stage pill alone was not discoverable enough to be it.
+            if ui_kit::primary_button(ui, "Finish and proceed to export").clicked() {
+                self.perform_action_deferred = Some("flow.finish".into());
+            }
+            {
+                let (rev, _rej, tot) = self.review_counts();
+                if rev < tot {
+                    ui.label(RichText::new(format!(
+                        "{} of {} leaves reviewed — you can export at any point.",
+                        fmt_thousands(rev), fmt_thousands(tot)))
+                        .small().color(ui_kit::MUTED()));
+                }
+            }
+            ui.add_space(10.0);
+            egui::CollapsingHeader::new("Leaf measurements")
+                .id_salt("panel_metrics").default_open(false)
+                .show(ui, |ui| self.show_leaf_morphology(ui));
+            egui::CollapsingHeader::new("All families across the run")
+                .id_salt("panel_clusters").default_open(false)
+                .show(ui, |ui| self.show_clusters_tab(ui, toasts));
+            egui::CollapsingHeader::new("Run log")
+                .id_salt("panel_log").default_open(false)
+                .show(ui, |ui| self.show_log_tab(ui));
+            // Messages, including the ones that self-dismissed. Toasts were being
+            // recorded into a history that nothing could read — so a message that
+            // flashed while you were looking elsewhere was simply gone.
+            egui::CollapsingHeader::new("Recent messages")
+                .id_salt("panel_msgs").default_open(false)
+                .show(ui, |ui| {
+                    let h = toasts.history();
+                    if h.is_empty() {
+                        ui.label(RichText::new("Nothing yet.").small().color(ui_kit::MUTED()));
+                        return;
+                    }
+                    egui::ScrollArea::vertical().max_height(200.0).id_salt("msg_hist")
+                        .show(ui, |ui| {
+                            for r in h.iter().rev().take(60) {
+                                let col = match r.kind {
+                                    crate::widgets::ToastKind::Error   => Color32::from_rgb(226, 122, 106),
+                                    crate::widgets::ToastKind::Warning => Color32::from_rgb(222, 178, 96),
+                                    crate::widgets::ToastKind::Success => ui_kit::ACCENT(),
+                                    crate::widgets::ToastKind::Info    => ui_kit::MUTED(),
+                                };
+                                ui.horizontal_top(|ui| {
+                                    ui.label(RichText::new(&r.at)
+                                        .text_style(ui_kit::numeric()).small().color(ui_kit::MUTED()));
+                                    ui.label(RichText::new(&r.message).small().color(col));
+                                });
+                            }
+                        });
+                });
+        });
+    }
+
+    /// The current detection, as a card: what the model called it, how sure it
+    /// was, how big it is, and the three verdicts with their keys printed.
+    fn show_selected_detection(&mut self, ui: &mut Ui, toasts: &mut ToastManager) {
+        let Some(ri) = self.selected_region.filter(|&i| self.region_visible(i)) else {
+            ui.add_space(6.0);
+            ui.label(RichText::new("No detection selected").small().color(ui_kit::MUTED()));
+            ui.label(RichText::new("Click one on the leaf, or press Down to step through them.")
+                .small().color(ui_kit::MUTED()));
+            ui.add_space(6.0);
+            return;
+        };
+        let cid = self.labels[ri];
+        let fam = self.class_display_name(cid);
+        let area = self.region_area.get(ri).copied().unwrap_or(0);
+        let leaf = self.regions[ri].leaf;
+        let leaf_px = self.leaf_valid_px.get(leaf).copied().unwrap_or(1).max(1);
+        let pct = 100.0 * area as f32 / leaf_px as f32;
+        let confirmed = self.persisted.contains(&ri);
+        let flagged = self.flagged.contains(&ri);
+
+        egui::Frame::none()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(egui::Margin::same(9.0))
+            .rounding(egui::Rounding::same(5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    family_swatch(ui, cid, 12.0);
+                    ui.label(RichText::new(&fam).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Human-confirmed vs model-proposed must be legible at a
+                        // glance — they are different scientific claims, and the
+                        // export now carries the distinction too.
+                        if confirmed {
+                            ui.label(RichText::new("confirmed").small().color(ui_kit::ACCENT()));
+                        } else {
+                            ui.label(RichText::new("model-proposed").small().color(ui_kit::MUTED()));
+                        }
+                        if flagged {
+                            ui.label(RichText::new("set aside").small()
+                                .color(Color32::from_rgb(225, 180, 90)));
+                        }
+                    });
+                });
+                ui.label(RichText::new(format!("{area} px · {pct:.2}% of leaf"))
+                    .text_style(ui_kit::numeric()).color(ui_kit::MUTED()));
+                ui.add_space(6.0);
+                // Key labels resolved up front: capturing `self` in the closure
+                // would hold an immutable borrow across the `perform_action`
+                // calls below, which need `&mut self`.
+                let k_ok = shortcuts::key_label(self.keymap.key("region.confirm"));
+                let k_no = shortcuts::key_label(self.keymap.key("region.reject"));
+                let k_fl = shortcuts::key_label(self.keymap.key("region.flag"));
+                let mut act: Option<&str> = None;
+                // WRAPPING. A plain `horizontal` reports the full un-wrapped width
+                // as its minimum, which is what pushed the panel wider every
+                // frame — see the note in show_cluster_panel.
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(format!("Accept  {k_ok}")).clicked() { act = Some("region.confirm"); }
+                    if ui.button(format!("Reject  {k_no}")).clicked() { act = Some("region.reject"); }
+                    if ui.button(format!("Aside  {k_fl}")).clicked() { act = Some("region.flag"); }
+                });
+                if let Some(a) = act {
+                    self.perform_action(a, toasts);
+                }
+            });
+        ui.add_space(8.0);
+    }
+
+    /// Mining and retraining. Lives on the DONE screen only.
+    ///
+    /// It was in the review panel, which put long-running machinery most users
+    /// never touch in the column they work in all day. Teaching the model is
+    /// something you decide once a run is finished — same moment as export — so
+    /// it belongs at the end, next to that decision.
+    ///
+    /// The export controls that used to sit beside it here are gone entirely:
+    /// the Done screen already has them, and two sets of the same checkboxes in
+    /// different places is worse than none.
+    fn show_improve_model(&mut self, ui: &mut Ui) {
+        // `Some(true)` FORCES the header open for one frame, then reverts to
+        // None so the user keeps control of it afterwards. This is what the
+        // "Teach the model" button drives — it used to send you to another
+        // screen with a toast telling you what to look for.
+        let force_open = if self.improve_open_req {
+            self.improve_open_req = false;
+            Some(true)
+        } else {
+            None
+        };
+        egui::CollapsingHeader::new("Improve the model")
+            .id_salt("curate_improve")
+            .default_open(false)
+            .open(force_open)
+            .show(ui, |ui| {
+        let can_retrain = self.output_folder.is_some() && self.eff_head().is_some()
+            && self.eff_dino().is_some() && !self.retraining && !self.running && !self.mining;
+
+        // ── the simple path ────────────────────────────────────────────────
+        // What someone teaching the model actually needs to know: what it will
+        // learn from, and that the base set is handled. Everything that used to
+        // live here — the base-set picker, base rows, the anchor slider, cold
+        // start, the diagnostics dump and hard-negative mining — is a tuning
+        // knob, and having six of them above the one button that does the work
+        // is what made this section read as an expert panel.
+        // Re-probe whenever it is still unset. Resolving only once in `default()`
+        // meant a base set that was not present at launch — or a launch from a
+        // working directory the search did not cover — stayed unset for the whole
+        // session with no way back except the manual picker.
+        if self.retrain_base_set.is_none() {
+            self.retrain_base_set = Self::default_base_set();
+        }
+        let curated = self.curation_row_count();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!(
+                "{} curated example{} to learn from.",
+                fmt_thousands(curated), if curated == 1 { "" } else { "s" }))
+                .strong());
+            if curated > 0 && ui.small_button("Delete all…")
+                .on_hover_text("Erase every curated example in this output folder and \
+                                start the flywheel clean. Use when the folder has been \
+                                contaminated by mislabelled or experimental curations.\n\n\
+                                Does NOT touch any head file — a head already retrained \
+                                from bad curations stays as it is; reselect the original.")
+                .clicked()
+            {
+                self.confirm_clear_curations = true;
+            }
+        });
+        match &self.retrain_base_set {
+            Some(p) => {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                ui.label(RichText::new(format!(
+                    "Base set: {name} — {} rows mixed in automatically.",
+                    fmt_thousands(self.effective_base_rows())))
+                    .small().color(ui_kit::MUTED()))
+                    .on_hover_text(BASE_ROWS_HELP);
+            }
+            None => {
+                let looked: Vec<String> = Self::base_set_candidates()
+                    .iter().map(|p| p.display().to_string()).collect();
+                ui.label(RichText::new(
+                    "No base training set found in models/ — a retrain without one \
+                     discards most of what the head already knew (IoU 0.475 -> 0.125). \
+                     Set one under Advanced.")
+                    .small().color(Color32::from_rgb(220, 170, 90)))
+                    .on_hover_text(format!("Searched:\n{}", looked.join("\n")));
+            }
+        }
+        // The retrain button itself, THEN the knobs. The action someone came
+        // here for should not be below six settings they were told not to touch.
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(can_retrain, |ui| {
+                if ui.button("🔄 Retrain from curations")
+                    .on_hover_text("Fine-tune the current few-shot head on everything confirmed/\n\
+                                    rejected so far this run (and any prior curations in the same\n\
+                                    output folder) — writes a NEW sibling file, never overwrites\n\
+                                    the original, so you can review before switching to it.\n\
+                                    Requires: few-shot head + DINO model + output folder.")
+                    .clicked()
+                {
+                    self.start_retrain();
+                }
+            });
+            if self.retraining {
+                ui_kit::busy(ui, &self.retrain_stage);
+                if ui.small_button("Cancel")
+                    .on_hover_text("Stop the retrain. The current head file is left untouched — \
+                                    a new one is only written when training finishes.")
+                    .clicked()
+                {
+                    self.retrain_cancel.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        if self.running && !self.retraining {
+            ui.label(RichText::new("Retrain is disabled while the pipeline is running.")
+                .small().color(Color32::GRAY));
+        }
+        if !self.retrain_log.is_empty() {
+            egui::ScrollArea::vertical().max_height(80.0).id_salt("pipeline_retrain_log")
+                .show(ui, |ui| {
+                    for line in self.retrain_log.iter().rev().take(20) {
+                        ui.label(RichText::new(line).small());
+                    }
+                });
+        }
+
+        // ── everything else ────────────────────────────────────────────────
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("Advanced")
+            .id_salt("improve_advanced")
+            .default_open(false)
+            .show(ui, |ui| {
+        self.pick_row(ui, "Base training set (.bin)", Pick::BaseSet);
+        ui.checkbox(&mut self.retrain_auto_base_rows, "Scale base rows with the curation count")
+            .on_hover_text(BASE_ROWS_HELP);
+        ui.horizontal(|ui| {
+            ui.label("base rows");
+            ui.add_enabled(!self.retrain_auto_base_rows,
+                egui::DragValue::new(&mut self.retrain_base_rows)
+                    .range(0..=400_000).speed(1000));
+            if self.retrain_auto_base_rows {
+                ui.label(RichText::new(format!("auto: {}", fmt_thousands(self.effective_base_rows())))
+                    .small().color(ui_kit::MUTED()));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("anchor to current head");
+            ui.add(egui::Slider::new(&mut self.retrain_anchor, 0.0..=1.0).fixed_decimals(2))
+                .on_hover_text("Pull the L2 penalty toward the CURRENT head instead of toward \
+                                zero.\n\n\
+                                0 = old behaviour: curations must out-vote the base rows for \
+                                influence.\n\
+                                1 = anchored: curations are the only data, and the penalty only \
+                                bounds how far the solution may travel. Where curations say \
+                                nothing, those weights simply stay put.\n\n\
+                                Measured on held-out leaves (LEARNS = agreement with held-out \
+                                curations, KEEPS = ground-truth IoU):\n\
+                                   no retrain          0.195 / 0.475\n\
+                                   base 50k, no anchor 0.969 / 0.460\n\
+                                   base 10k, no anchor 0.985 / 0.431\n\
+                                   base 10k + anchor   0.942 / 0.476  <- best\n\n\
+                                A brand-new class has no prior, so it falls back to ordinary \
+                                zero-centered L2 and can still learn freely.");
+        });
+        ui.label(RichText::new(
+            "Base rows stop a retrain from discarding what the head already knew (without \
+             them: IoU 0.475 -> 0.125). The anchor does the same job by bounding travel \
+             rather than out-voting the curations, so 10k rows + anchor beats 50k rows \
+             alone on BOTH learning and retention. Build a base set with \
+             1Help/eval/export_base_set.py."
+        ).small().color(Color32::GRAY));
+        ui.add_space(4.0);
+        ui.checkbox(&mut self.retrain_cold_start, "Train from scratch (no warm start)")
+            .on_hover_text("Every retrain already reads ALL accumulated curations, not just new \
+                            ones — this only changes where the solver STARTS. Normally it warm-\
+                            starts from the current head's own coefficients; with this on, any \
+                            class that has curated examples this run starts from zero instead, so \
+                            its result depends only on the curated evidence itself, not on \
+                            whatever the head happened to already believe (which may itself be a \
+                            degraded result from an earlier retrain). Classes with NO curated \
+                            examples in this output folder's history are unaffected either way — \
+                            there's nothing to retrain them from, so they keep their existing \
+                            (e.g. original bulk-trained) weights exactly as normal retrain does. \
+                            Good for diagnosing a retrain that keeps getting worse: if this comes \
+                            out meaningfully different (and better), the warm start was the \
+                            problem; if it's the same or worse, look at the curated data instead.");
+        ui.checkbox(&mut self.retrain_dump, "Dump training data (diagnostics)")
+            .on_hover_text("Writes <output>/retrain_diag/: retrain_dump.bin (the EXACT feature \
+                            rows, classes and weights this retrain trains on) and \
+                            retrain_diag.json (per-class coefficient norms + intercepts before \
+                            and after, plus solver settings and convergence). Lets an \
+                            independent solver be fitted on byte-identical data, so the DATA and \
+                            the SOLVER can finally be told apart — every data-side explanation \
+                            for 'retrains come back too conservative' has tested null so far, and \
+                            this holds the data fixed to isolate warm-start/freeze/L-BFGS. \
+                            The .bin is rows x dim x 4 bytes — often several hundred MB — so \
+                            leave this off for normal runs.");
+        // Hard-negative mining: powerful, slow, and permanently inflates every
+        // future retrain, so it belongs behind Advanced rather than being the
+        // first thing in the section.
+        ui.add_space(6.0);
+        ui.separator();
+        self.show_mine_hardneg(ui);
+            }); // end "Advanced"
+            }); // end "Improve the model"
+    }
+    /// The verdicts, as the panel's visual anchor: one big affirmative, two
+    /// smaller corrections, and the leaf-level reject in a warning colour.
+    ///
+    /// They sit BELOW the grid on purpose — you look, then you decide, and the
+    /// buttons should be where your eye ends up rather than something you scroll
+    /// past on the way in. Sizes encode frequency: the accept path is pressed
+    /// far more than the others, so it gets the width and the colour.
+    fn show_verdict_block(&mut self, ui: &mut Ui, row_w: f32, toasts: &mut ToastManager) {
+        // No family focused: still offer the leaf-level verdicts rather than
+        // showing nothing. Landing on a leaf and finding no buttons at all read
+        // as a dead end — the panel looked broken until you happened to click a
+        // family.
+        let Some(cid) = self.selected_cluster else {
+            ui.add_space(10.0);
+            ui.label(RichText::new("Pick a family above to judge it as a group.")
+                .small().color(ui_kit::MUTED()));
+            ui.add_space(4.0);
+            if let Some(li) = self.selected_idx {
+                let k_x = shortcuts::key_label(self.keymap.key("leaf.reject"));
+                let k_m = shortcuts::key_label(self.keymap.key("leaf.reviewed"));
+                let rejected = self.rejected_leaves.contains(&li);
+                let reviewed = self.reviewed.contains(&li);
+                if !rejected && ui.add_sized([row_w, 30.0],
+                    egui::Button::new(RichText::new(if reviewed {
+                        format!("Reviewed   {k_m}")
+                    } else {
+                        format!("Mark this leaf reviewed   {k_m}")
+                    }).strong().color(if reviewed { ui_kit::on_accent() } else { ui.visuals().text_color() }))
+                    .fill(if reviewed { ui_kit::ACCENT() } else { ui.visuals().widgets.inactive.bg_fill }))
+                    .clicked()
+                {
+                    self.toggle_reviewed(li, toasts);
+                }
+                ui.add_space(4.0);
+                let (txt, fill) = if rejected {
+                    (format!("Restore this leaf   {k_x}"), Color32::from_rgb(90, 90, 95))
+                } else {
+                    (format!("Reject whole leaf   {k_x}"), Color32::from_rgb(168, 72, 27))
+                };
+                if ui.add_sized([row_w, 30.0],
+                    egui::Button::new(RichText::new(txt).color(Color32::WHITE).strong()).fill(fill))
+                    .clicked()
+                {
+                    self.toggle_reject_leaf(li, toasts);
+                }
+            }
+            return;
+        };
+        let fam = self.class_display_name(cid);
+        let pending: Vec<usize> = (0..self.regions.len())
+            .filter(|&i| {
+                self.region_visible(i) && self.labels[i] == cid && !self.persisted.contains(&i)
+                    && (!self.filter_leaf_only
+                        || self.selected_idx.map_or(true, |li| self.regions[i].leaf == li))
+            })
+            .collect();
+
+        ui.add_space(10.0);
+        let w = row_w;
+        let k_ok = shortcuts::key_label(self.keymap.key("region.confirm"));
+        let k_re = shortcuts::key_label(self.keymap.key("region.reassign"));
+        let k_no = shortcuts::key_label(self.keymap.key("region.reject"));
+        let k_x  = shortcuts::key_label(self.keymap.key("leaf.reject"));
+
+        let mut act: Option<&str> = None;
+        let mut confirm_family = false;
+
+        ui.add_enabled_ui(!pending.is_empty(), |ui| {
+            let label = RichText::new(format!("{fam} is correct   {k_ok}"))
+                .strong().color(ui_kit::on_accent());
+            if ui.add_sized([w, 34.0], egui::Button::new(label).fill(ui_kit::ACCENT()))
+                .on_hover_text(format!(
+                    "Accept all {} unreviewed {fam} regions shown above.\n\n\
+                     Check the first rows first — with \u{201c}Unusual first\u{201d} the ones least \
+                     like the rest of the family are at the top.\n\nUndoable with Ctrl+Z.",
+                    pending.len()))
+                .on_disabled_hover_text("Everything in this family has already been reviewed.")
+                .clicked()
+            {
+                confirm_family = true;
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let half = (w - 6.0) / 2.0;
+            let has_sel = !self.effective_selection().is_empty();
+            ui.add_enabled_ui(has_sel, |ui| {
+                if ui.add_sized([half, 28.0], egui::Button::new(format!("Reclassify   {k_re}")))
+                    .on_disabled_hover_text("Select a detection first.")
+                    .clicked()
+                {
+                    act = Some("region.reassign");
+                }
+                if ui.add_sized([half, 28.0], egui::Button::new(format!("Discard   {k_no}")))
+                    .on_disabled_hover_text("Select a detection first.")
+                    .clicked()
+                {
+                    act = Some("region.reject");
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if let Some(li) = self.selected_idx {
+            let rejected = self.rejected_leaves.contains(&li);
+            let (txt, fill) = if rejected {
+                (format!("Restore this leaf   {k_x}"), Color32::from_rgb(90, 90, 95))
+            } else {
+                (format!("Reject whole leaf   {k_x}"), Color32::from_rgb(168, 72, 27))
+            };
+            if ui.add_sized([w, 30.0],
+                egui::Button::new(RichText::new(txt).color(Color32::WHITE).strong()).fill(fill))
+                .on_hover_text("Throw this leaf out of the run entirely — excluded from the CSV, \
+                                the counts and from mining. Reversible, and saved to disk.")
+                .clicked()
+            {
+                self.toggle_reject_leaf(li, toasts);
+            }
+        }
+        if confirm_family {
+            let n = pending.len();
+            self.confirm_regions(&pending, toasts);
+            toasts.success(format!("Confirmed {n} as {fam}"));
+        }
+        if let Some(a) = act {
+            self.perform_action(a, toasts);
+        }
+    }
+
+    /// Families as a persistent legend: swatch, dash style, name, count, and the
+    /// number key that assigns it.
+    ///
+    /// One element doing three jobs — external memory (what the colours mean),
+    /// signifier (click to focus), and the surface that teaches the number keys.
+    /// Previously this lived in a table behind a tab, so the colour code was only
+    /// visible if you went looking for it.
+    fn show_family_legend(&mut self, ui: &mut Ui, row_w: f32) {
+        ui_kit::section_header(ui, if self.filter_leaf_only {
+            "Families on this leaf"
+        } else {
+            "Families in this run"
+        });
+        let ids: Vec<i32> = self.clusters.iter().map(|c| c.id).collect();
+        let mut focus: Option<Option<i32>> = None;
+
+        for (n, cid) in ids.iter().copied().enumerate() {
+            // Count what the CURRENT filter shows, so the number beside a family
+            // always matches what clicking it will give you.
+            let count = (0..self.regions.len())
+                .filter(|&i| {
+                    self.region_visible(i) && self.labels[i] == cid
+                        && (!self.filter_leaf_only
+                            || self.selected_idx.map_or(true, |li| self.regions[i].leaf == li))
+                })
+                .count();
+            if count == 0 { continue; }
+            let selected = self.selected_cluster == Some(cid);
+            let name = self.class_display_name(cid);
+
+            // A selected row is a filled bar with an accent edge — the mockup's
+            // treatment. Plain bold text did not read as "this is the one", and
+            // the row did not read as clickable at all.
+            let row_h = 24.0;
+            let (rect, resp) = ui.allocate_exact_size(
+                egui::vec2(row_w, row_h), egui::Sense::click(),
+            );
+            let hovered = resp.hovered();
+            if selected || hovered {
+                let fill = if selected {
+                    ui_kit::ACCENT().linear_multiply(0.16)
+                } else {
+                    ui.visuals().faint_bg_color
+                };
+                ui.painter().rect_filled(rect, 3.0, fill);
+            }
+            if selected {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(rect.min, egui::vec2(3.0, row_h)),
+                    1.0, ui_kit::ACCENT(),
+                );
+            }
+            let mut x = rect.left() + 10.0;
+            let mid = rect.center().y;
+            let dim = ui_kit::MUTED();
+            if n < 9 {
+                ui.painter().text(
+                    egui::pos2(x, mid), egui::Align2::LEFT_CENTER, format!("{}", n + 1),
+                    egui::FontId::monospace(11.0), dim,
+                );
+            }
+            x += 16.0;
+            let c = cluster_color(cid);
+            let col = Color32::from_rgb(c[0], c[1], c[2]);
+            let sw = egui::Rect::from_min_size(egui::pos2(x, mid - 5.0), egui::vec2(16.0, 10.0));
+            match cluster_dash(cid) {
+                None => {
+                    ui.painter().rect_filled(sw, 2.0, col);
+                }
+                Some(d) => {
+                    ui.painter().rect_filled(sw, 2.0, col.linear_multiply(0.3));
+                    let dd = (d * 0.9).clamp(2.0, 5.0);
+                    ui.painter().add(egui::Shape::dashed_line(
+                        &[egui::pos2(sw.left() + 1.0, mid), egui::pos2(sw.right() - 1.0, mid)],
+                        egui::Stroke::new(2.0, col), dd, dd * 0.7,
+                    ));
+                }
+            }
+            x += 24.0;
+            ui.painter().text(
+                egui::pos2(x, mid), egui::Align2::LEFT_CENTER, &name,
+                egui::FontId::proportional(13.5),
+                if selected { ui.visuals().strong_text_color() } else { ui.visuals().text_color() },
+            );
+            ui.painter().text(
+                egui::pos2(rect.right() - 10.0, mid), egui::Align2::RIGHT_CENTER,
+                fmt_thousands(count),
+                egui::FontId::monospace(12.0), dim,
+            );
+
+            // Clicking the SWATCH recolours; clicking anywhere else focuses.
+            // The swatch is the thing that represents the colour, so it is where
+            // a user reaches to change it.
+            let on_swatch = resp.hover_pos().map_or(false, |p| sw.expand(3.0).contains(p));
+            if resp.clicked() {
+                if on_swatch {
+                    self.recolour_family = Some(cid);
+                } else {
+                    focus = Some(if selected { None } else { Some(cid) });
+                }
+            }
+            resp.on_hover_text(format!(
+                "Show only {name}.\nClick the colour patch to change it.{}",
+                if n < 9 { format!("\nKey {} assigns the selection to it.", n + 1) } else { String::new() }
+            ));
+        }
+
+        if let Some(f) = focus {
+            self.selected_cluster = f;
+            self.selected_region = None;
+            self.gallery_page = 0;
+            self.overlay_tex = None;
+        }
+
+        // Recolour popup: the eight colour-blind-safe hues plus a reset.
+        // A fixed palette rather than a free colour wheel on purpose — the whole
+        // point of Okabe-Ito is that the set stays distinguishable, and letting
+        // someone pick two near-identical greens would undo that.
+        if let Some(cid) = self.recolour_family {
+            let mut open = true;
+            egui::Window::new(format!("Colour for {}", self.class_display_name(cid)))
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for c in CLUSTER_PALETTE {
+                            let (rect, r) = ui.allocate_exact_size(
+                                egui::vec2(30.0, 24.0), egui::Sense::click());
+                            ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(c[0], c[1], c[2]));
+                            if cluster_color(cid) == c {
+                                ui.painter().rect_stroke(rect.expand(1.0), 3.0,
+                                    egui::Stroke::new(2.0, Color32::WHITE));
+                            }
+                            if r.clicked() {
+                                set_family_color(cid, Some(c));
+                                self.overlay_tex = None;
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if ui.button("Back to the default").clicked() {
+                        set_family_color(cid, None);
+                        self.overlay_tex = None;
+                    }
+                });
+            if !open {
+                self.recolour_family = None;
+            }
         }
     }
 
@@ -2996,7 +5174,7 @@ impl PipelineTab {
                     100.0 * recon_area / recon_whole, recon_area as u64
                 ))
                 .small()
-                .color(ui_kit::ACCENT),
+                .color(ui_kit::ACCENT()),
             )
             .on_hover_text("Leaf area the model reconstructed (damaged/missing tissue) as a \
                             fraction of the whole intact leaf.");
@@ -3026,7 +5204,7 @@ impl PipelineTab {
                 .body(|mut body| {
                     for ci in 0..self.clusters.len() {
                         let cid = self.clusters[ci].id;
-                        let col = cluster_color(cid);
+                        // colour + dash now come from family_swatch
                         let (mut total, mut leaf_px) = (0u64, 0u64);
                         for k in 0..self.clusters[ci].members.len() {
                             let ri = self.clusters[ci].members[k];
@@ -3054,11 +5232,34 @@ impl PipelineTab {
                                 }
                             });
                             row.col(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                                ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(col[0], col[1], col[2]));
+                                if ci < 9 {
+                                    ui.label(RichText::new(format!("{}", ci + 1))
+                                        .text_style(ui_kit::numeric()).color(ui_kit::MUTED()))
+                                        .on_hover_text("Press this number to assign the selected detections to this family.");
+                                }
+                                family_swatch(ui, cid, 10.0);
                                 let mut name = self.cluster_names.get(&cid).cloned()
                                     .unwrap_or_else(|| format!("Cluster {cid}"));
-                                if ui.add(egui::TextEdit::singleline(&mut name).desired_width(190.0)).changed() {
+                                // COMMIT on blur/Enter, not on every keystroke.
+                                // `.changed()` fires per character, so typing an
+                                // 8-letter name performed 8 full head-file
+                                // rewrites — and each one overwrote the .json.bak,
+                                // so the "backup before either edit" the tooltip
+                                // promises ended up holding the state after the
+                                // second-to-last keystroke rather than the
+                                // original. It also re-persisted every member of
+                                // the cluster 8 times over.
+                                let te = ui.add(
+                                    egui::TextEdit::singleline(&mut name).desired_width(190.0),
+                                );
+                                // Keep the in-memory label live so the field does
+                                // not fight the typist; only the DISK writes wait.
+                                if te.changed() {
+                                    self.cluster_names.insert(cid, name.clone());
+                                }
+                                // lost_focus() covers Enter, Tab and clicking away
+                                // — every way a person signals "I'm done typing".
+                                if te.lost_focus() {
                                     self.cluster_names.insert(cid, name.clone());
                                     // propagate the rename to disk: any member already
                                     // persisted needs its family string re-written so it
@@ -3117,8 +5318,21 @@ impl PipelineTab {
                                 if let Some(into_id) = target {
                                     self.merge_cluster_names(cid, into_id, toasts);
                                 }
+                                // Confirm, because this is the one action in the
+                                // tab that is both irreversible and reachable by
+                                // two clicks in a 28px-wide menu column: it
+                                // rewrites EVERY curated row of the family to
+                                // "rejected" on disk and removes the class from
+                                // the head. The .json.bak is best-effort, so there
+                                // may be nothing to go back to.
+                                //
+                                // Routine curation actions deliberately have NO
+                                // dialog — a reviewer pressing a key 20,000 times
+                                // learns to dismiss them, which removes the
+                                // protection exactly where it matters. Rare and
+                                // unrecoverable is the only case that earns one.
                                 if delete {
-                                    self.delete_cluster_from_head(cid, toasts);
+                                    self.pending_delete_cluster = Some(cid);
                                 }
                             });
                         });
@@ -3142,81 +5356,16 @@ impl PipelineTab {
             return;
         }
 
-        // ── filter by cluster directly, without needing to click a scatter
-        // point or an existing thumbnail first ──
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Filter:").small());
-            let cur_label = self.selected_cluster
-                .map(|c| self.cluster_names.get(&c).cloned().unwrap_or_else(|| format!("Cluster {c}")))
-                .unwrap_or_else(|| "All clusters".to_string());
-            egui::ComboBox::from_id_salt("curate_cluster_filter")
-                .selected_text(cur_label)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(self.selected_cluster.is_none(), "All clusters").clicked() {
-                        self.selected_cluster = None;
-                    }
-                    for c in &self.clusters {
-                        let name = self.cluster_names.get(&c.id).cloned().unwrap_or_else(|| format!("Cluster {}", c.id));
-                        if ui.selectable_label(self.selected_cluster == Some(c.id), name).clicked() {
-                            self.selected_cluster = Some(c.id);
-                        }
-                    }
-                });
-            ui.add_enabled_ui(self.selected_idx.is_some(), |ui| {
-                ui.checkbox(&mut self.filter_leaf_only, "This leaf only")
-                    .on_hover_text("Show only the regions on the leaf currently open in the \
-                                    Leaf view — small regions are easy to miss in the full \
-                                    dataset gallery, which makes it hard to tell when a single \
-                                    leaf is actually fully reviewed.");
-            });
-        });
-
-        // Per-leaf review status — the concrete "is this leaf done" readout
-        // the dataset-wide counts above can't give you, and what the new
-        // unmarked-leaf-area miner (below) actually gates on per leaf.
-        if let Some(li) = self.selected_idx {
-            let leaf_regions: Vec<usize> = self.regions.iter().enumerate()
-                .filter(|(_, r)| r.leaf == li).map(|(i, _)| i).collect();
-            if !leaf_regions.is_empty() {
-                let pending = leaf_regions.iter()
-                    .filter(|&&i| self.region_visible(i) && !self.persisted.contains(&i))
-                    .count();
-                let (msg, color) = if pending == 0 {
-                    (format!("Leaf {li}: {} region(s), fully reviewed ✅", leaf_regions.len()), Color32::from_rgb(140, 230, 150))
-                } else {
-                    (format!("Leaf {li}: {pending} of {} region(s) still pending", leaf_regions.len()), Color32::from_rgb(230, 190, 90))
-                };
-                ui.label(RichText::new(msg).small().color(color));
-            }
-        }
-        ui.separator();
-
-        // ── flywheel: every Confirm/Reject/Reassign below already writes to
-        // curations/ the instant it happens — nothing here is "unsaved." This
-        // button is a bulk accelerator for the common case of fast-approving
-        // everything you didn't individually touch. ──
-        ui.horizontal(|ui| {
-            let (n_persisted, n_removed) = (self.persisted.len(), self.removed.len());
-            let n_unreviewed = (0..self.regions.len())
-                .filter(|&i| !self.persisted.contains(&i) && self.region_visible(i))
-                .count();
-            ui.label(RichText::new(format!(
-                "{n_persisted} confirmed · {n_removed} rejected · {n_unreviewed} unreviewed"
-            )).small().color(Color32::GRAY));
-        });
-        if ui.button("✅ Confirm all remaining")
-            .on_hover_text("Confirm every region you haven't individually reviewed yet\n\
-                            (writes each one's current cluster name to curations/ now).\n\
-                            Confirm/Reject/Reassign already save immediately as you do them —\n\
-                            this is just a shortcut for the rest.")
-            .clicked()
-        {
-            self.confirm_all_remaining(toasts);
-        }
-        ui.separator();
-
-        self.show_mine_hardneg(ui);
-        ui.separator();
+        // The cluster combo, the "This leaf only" checkbox, the per-leaf pending
+        // line, the dataset-wide counts and the bulk-confirm button all used to
+        // sit HERE, above the grid — five controls and two status lines between
+        // the family list and the pictures the reviewer came to look at.
+        //
+        // The family legend now does the filtering (click a family), the status
+        // bar carries the counts, and bulk confirm moved next to the other
+        // verdicts at the bottom where the decisions live. "This leaf only" moved
+        // to the section header, since that is the one place its meaning is
+        // obvious.
 
         // ── in-place retrain: fine-tune the head from this run's curations
         // without leaving Pipeline ──
@@ -3232,8 +5381,13 @@ impl PipelineTab {
                         if ui.button("Use this head now").clicked() {
                             self.head_path = Some(new_head.clone());
                             self.retrain_done = None;
-                            self.reset_run_state();
-                            toasts.info("Switched to the retrained head — click Run Pipeline to see corrected results.");
+                            let (rev, rej, _) = self.review_counts();
+                            if !self.results.is_empty() && (rev + rej > 0) {
+                                self.pending_reset = Some(PendingReset::SwitchHead);
+                            } else {
+                                self.reset_run_state();
+                                toasts.info("Switched to the retrained head — click Run Pipeline to see corrected results.");
+                            }
                         }
                         if ui.button("Dismiss").clicked() {
                             self.retrain_done = None;
@@ -3242,105 +5396,14 @@ impl PipelineTab {
                 });
             ui.add_space(4.0);
         }
-        let can_retrain = self.output_folder.is_some() && self.eff_head().is_some()
-            && self.eff_dino().is_some() && !self.retraining && !self.running && !self.mining;
-        self.pick_row(ui, "Base training set (.bin)", Pick::BaseSet);
-        ui.horizontal(|ui| {
-            ui.label("base rows");
-            ui.add(egui::DragValue::new(&mut self.retrain_base_rows)
-                .range(0..=400_000).speed(1000));
-        });
-        ui.horizontal(|ui| {
-            ui.label("anchor to current head");
-            ui.add(egui::Slider::new(&mut self.retrain_anchor, 0.0..=1.0).fixed_decimals(2))
-                .on_hover_text("Pull the L2 penalty toward the CURRENT head instead of toward \
-                                zero.\n\n\
-                                0 = old behaviour: curations must out-vote the base rows for \
-                                influence.\n\
-                                1 = anchored: curations are the only data, and the penalty only \
-                                bounds how far the solution may travel. Where curations say \
-                                nothing, those weights simply stay put.\n\n\
-                                Measured on held-out leaves (LEARNS = agreement with held-out \
-                                curations, KEEPS = ground-truth IoU):\n\
-                                   no retrain          0.195 / 0.475\n\
-                                   base 50k, no anchor 0.969 / 0.460\n\
-                                   base 10k, no anchor 0.985 / 0.431\n\
-                                   base 10k + anchor   0.942 / 0.476  <- best\n\n\
-                                A brand-new class has no prior, so it falls back to ordinary \
-                                zero-centered L2 and can still learn freely.");
-        });
-        ui.label(RichText::new(
-            "Base rows stop a retrain from discarding what the head already knew (without \
-             them: IoU 0.475 -> 0.125). The anchor does the same job by bounding travel \
-             rather than out-voting the curations, so 10k rows + anchor beats 50k rows \
-             alone on BOTH learning and retention. Build a base set with \
-             1Help/eval/export_base_set.py."
-        ).small().color(Color32::GRAY));
-        ui.add_space(4.0);
-        ui.checkbox(&mut self.retrain_cold_start, "Train from scratch (no warm start)")
-            .on_hover_text("Every retrain already reads ALL accumulated curations, not just new \
-                            ones — this only changes where the solver STARTS. Normally it warm-\
-                            starts from the current head's own coefficients; with this on, any \
-                            class that has curated examples this run starts from zero instead, so \
-                            its result depends only on the curated evidence itself, not on \
-                            whatever the head happened to already believe (which may itself be a \
-                            degraded result from an earlier retrain). Classes with NO curated \
-                            examples in this output folder's history are unaffected either way — \
-                            there's nothing to retrain them from, so they keep their existing \
-                            (e.g. original bulk-trained) weights exactly as normal retrain does. \
-                            Good for diagnosing a retrain that keeps getting worse: if this comes \
-                            out meaningfully different (and better), the warm start was the \
-                            problem; if it's the same or worse, look at the curated data instead.");
-        ui.checkbox(&mut self.retrain_dump, "Dump training data (diagnostics)")
-            .on_hover_text("Writes <output>/retrain_diag/: retrain_dump.bin (the EXACT feature \
-                            rows, classes and weights this retrain trains on) and \
-                            retrain_diag.json (per-class coefficient norms + intercepts before \
-                            and after, plus solver settings and convergence). Lets an \
-                            independent solver be fitted on byte-identical data, so the DATA and \
-                            the SOLVER can finally be told apart — every data-side explanation \
-                            for 'retrains come back too conservative' has tested null so far, and \
-                            this holds the data fixed to isolate warm-start/freeze/L-BFGS. \
-                            The .bin is rows x dim x 4 bytes — often several hundred MB — so \
-                            leave this off for normal runs.");
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(can_retrain, |ui| {
-                if ui.button("🔄 Retrain from curations")
-                    .on_hover_text("Fine-tune the current few-shot head on everything confirmed/\n\
-                                    rejected so far this run (and any prior curations in the same\n\
-                                    output folder) — writes a NEW sibling file, never overwrites\n\
-                                    the original, so you can review before switching to it.\n\
-                                    Requires: few-shot head + DINO model + output folder.")
-                    .clicked()
-                {
-                    self.start_retrain();
-                }
-            });
-            if self.retraining {
-                ui_kit::busy(ui, &self.retrain_stage);
-            }
-        });
-        if self.running && !self.retraining {
-            ui.label(RichText::new("Retrain is disabled while the pipeline is running.")
-                .small().color(Color32::GRAY));
-        }
-        if !self.retrain_log.is_empty() {
-            egui::ScrollArea::vertical().max_height(80.0).id_salt("pipeline_retrain_log").show(ui, |ui| {
-                for line in self.retrain_log.iter().rev().take(20) {
-                    ui.label(RichText::new(line).small());
-                }
-            });
-        }
-        ui.separator();
-        if ui.button("📤 Export results (CSV + images)")
-            .on_hover_text("Write <output>/export/: results.csv (ONE row per anomaly — cluster, \n\
-                            region stats, Recon %, AND the leaf's morphology, all in one file), \n\
-                            crops/ (each anomaly image) and leaves/ (each leaf with anomalies \n\
-                            colour-coded by family).")
-            .clicked()
-        {
-            self.export_results(toasts);
-        }
-        ui.separator();
+        // ── everything below here is model-engineering, folded away by default ──
+        //
+        // These ~20 controls (mining, base set, base rows, anchor, cold start,
+        // diagnostics dump, export) used to sit ABOVE the review gallery, so the
+        // surface used ten thousand times a batch was reached by scrolling past
+        // machinery most users never touch. Collapsed, they cost one line each and
+        // the gallery is immediately visible; nothing is removed, and anyone who
+        // wants them opens the section once and egui remembers it.
 
         // ── anomaly gallery (filtered to the selected cluster, paginated) ──
         const PER_PAGE: usize = GALLERY_PER_PAGE;
@@ -3349,40 +5412,95 @@ impl PipelineTab {
                 self.region_visible(i)
                     && self.selected_cluster.map_or(true, |c| self.labels[i] == c)
                     && (!self.filter_leaf_only || self.selected_idx.map_or(true, |li| self.regions[i].leaf == li))
+                    && (!self.filter_flagged || self.flagged.contains(&i))
             })
             .collect();
-        // group by cluster (stable within each cluster, so pagination stays
-        // predictable) — matters when no single cluster is selected, so the
-        // gallery doesn't interleave unrelated families in raw detection order.
-        filtered.sort_by_key(|&i| self.labels[i]);
+        // ── ordering ────────────────────────────────────────────────────────
+        // With 6,000+ regions on a single leaf, judging them one by one is not a
+        // workflow — 6,000 x ~1.5s is over two hours for ONE leaf. The unit of
+        // review has to be the family, and the only way that is safe is if the
+        // few members that DON'T belong surface first. So: sort by how unlike its
+        // own family each region is, worst first, and the reviewer checks the
+        // head of the list instead of all of it.
+        match self.gallery_sort {
+            GallerySort::Largest => {
+                filtered.sort_by_key(|&i| std::cmp::Reverse(self.region_area.get(i).copied().unwrap_or(0)));
+            }
+            GallerySort::Unusual => {
+                let score = self.atypicality();
+                filtered.sort_by(|&a, &b| {
+                    score.get(&b).unwrap_or(&0.0)
+                        .partial_cmp(score.get(&a).unwrap_or(&0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
         let total = filtered.len();
         let n_pages = total.div_ceil(PER_PAGE).max(1);
         if self.gallery_page >= n_pages {
             self.gallery_page = 0;
         }
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Anomalies — {total} total")).small().color(Color32::GRAY));
-            if n_pages > 1 {
-                if ui.small_button("◀").clicked() && self.gallery_page > 0 {
-                    self.gallery_page -= 1;
-                }
-                ui.label(RichText::new(format!("page {}/{}", self.gallery_page + 1, n_pages)).small());
-                if ui.small_button("▶").clicked() && self.gallery_page + 1 < n_pages {
-                    self.gallery_page += 1;
-                }
-            }
-            ui.add_enabled_ui(!self.struct_undo.is_empty(), |ui| {
-                if ui.small_button(format!("↩ Undo ({})", self.struct_undo.len()))
-                    .on_hover_text("Undo the most recent remove or knife cut (Ctrl+Z).")
-                    .clicked()
-                {
-                    self.undo_last_edit(toasts);
-                }
+        // ── family-level review ─────────────────────────────────────────────
+        // The action that makes thousands of regions tractable: judge the whole
+        // family at once, having checked the head of an unusual-first list, then
+        // spend the remaining attention on the few that stood out.
+        // Family header line: swatch + name + how much of it is still unreviewed.
+        if let Some(cid) = self.selected_cluster {
+            let fam = self.class_display_name(cid);
+            let pending = filtered.iter().filter(|i| !self.persisted.contains(i)).count();
+            ui.horizontal(|ui| {
+                family_swatch(ui, cid, 11.0);
+                ui.label(RichText::new(&fam).strong());
+                ui.label(RichText::new(format!("{pending} unreviewed"))
+                    .small().color(ui_kit::MUTED()));
             });
-        });
-        ui.label(RichText::new("click = highlight on leaf · right-click = reject · ctrl+click = multi-select \
-                                 · Enter = confirm · Delete = reject")
-            .small().color(Color32::DARK_GRAY));
+        }
+
+        // ── section header, mockup style ────────────────────────────────────
+        // "NEKROSIS — 341 REGIONS · 4 LOOK UNUSUAL" says what you are looking at
+        // and where the risk is, in one line. The old header was a bare count
+        // plus five controls.
+        {
+            let unusual = if self.regions.iter().any(|r| !r.dino_embed.is_empty()) {
+                let score = self.atypicality();
+                filtered.iter().filter(|i| score.get(i).copied().unwrap_or(0.0) > 0.35).count()
+            } else { 0 };
+            let title = match self.selected_cluster {
+                Some(cid) => format!("{} — {} regions", self.class_display_name(cid).to_uppercase(),
+                                     fmt_thousands(total)),
+                None => format!("ALL FAMILIES — {} regions", fmt_thousands(total)),
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).small().strong().color(ui_kit::MUTED()));
+                if unusual > 0 {
+                    ui.label(RichText::new(format!("· {unusual} look unusual"))
+                        .small().strong().color(Color32::from_rgb(225, 175, 85)));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled_ui(self.selected_idx.is_some(), |ui| {
+                        ui.checkbox(&mut self.filter_leaf_only, "This leaf only")
+                            .on_hover_text("Limit everything above to the leaf currently open.");
+                    });
+                });
+            });
+        }
+        // Replaces a line of mouse-gesture documentation that belongs in the
+        // shortcuts window, not above the pictures.
+        {
+            let shown = (self.gallery_page + 1) * PER_PAGE;
+            let more = total.saturating_sub(shown.min(total));
+            let how = match self.gallery_sort {
+                GallerySort::Unusual if self.regions.iter().any(|r| !r.dino_embed.is_empty()) =>
+                    "sorted least-typical first",
+                GallerySort::Unusual => "sorted by unusual size",
+                GallerySort::Largest => "sorted largest first",
+            };
+            ui.label(RichText::new(if more > 0 {
+                format!("{how} · {} more", fmt_thousands(more))
+            } else {
+                how.to_string()
+            }).small().color(ui_kit::MUTED()));
+        }
         let curate_sel = self.effective_selection();
         if !curate_sel.is_empty() {
             ui.horizontal(|ui| {
@@ -3412,83 +5530,206 @@ impl PipelineTab {
         for &i in &show_idxs {
             self.ensure_region_thumb(ctx, i);
         }
-        egui::ScrollArea::vertical().id_salt("anomaly_gallery").show(ui, |ui| {
-            // grouped by cluster (show_idxs is pre-sorted by label above) —
-            // a small heading per run so the sort is visually obvious, not
-            // just an implicit ordering.
-            let mut idx = 0;
-            while idx < show_idxs.len() {
-                let cid = self.labels[show_idxs[idx]];
-                let mut end = idx + 1;
-                while end < show_idxs.len() && self.labels[show_idxs[end]] == cid {
-                    end += 1;
-                }
-                let col = cluster_color(cid);
-                let name = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(col[0], col[1], col[2]));
-                    ui.label(RichText::new(format!("{name} ({})", end - idx)).small().strong());
-                });
+        // ── ONE uniform grid ────────────────────────────────────────────────
+        // It used to start a new headed group each time the label changed while
+        // walking the page. That was fine when the sort was BY cluster, but the
+        // sort is now by atypicality, so families interleave and you got
+        // "Nekrosis (1)", "Sucker (9)", "Nekrosis (2)", "Sucker (3)"... the same
+        // family announced over and over down the column. Which family a tile
+        // belongs to is already carried by the coloured stripe on the tile.
+        egui::ScrollArea::vertical()
+            .id_salt("anomaly_gallery")
+            .max_height(360.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    for &i in &show_idxs[idx..end] {
-                        if let Some(tex) = &self.region_thumbs[i] {
-                            let resp = ui
-                                .add(egui::ImageButton::new((tex.id(), egui::vec2(48.0, 48.0))))
-                                .on_hover_text(format!("region {i} · leaf {}", self.regions[i].leaf));
-                            if self.selected_region == Some(i) {
-                                ui.painter().rect_stroke(resp.rect, 2.0,
-                                    egui::Stroke::new(2.0, Color32::from_rgb(255, 230, 0)));
-                                if self.scroll_to_selected {
-                                    resp.scroll_to_me(Some(egui::Align::Center));
-                                    self.scroll_to_selected = false;
-                                }
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for &i in &show_idxs {
+                        let Some(tex) = &self.region_thumbs[i] else { continue };
+                        let sel = self.selected_region == Some(i);
+                        let resp = ui
+                            .add(egui::ImageButton::new((tex.id(), egui::vec2(54.0, 54.0))))
+                            .on_hover_text(format!(
+                                "{} - leaf {} - {} px",
+                                self.class_display_name(self.labels[i]),
+                                self.regions[i].leaf + 1,
+                                self.region_area.get(i).copied().unwrap_or(0),
+                            ));
+                        let r = resp.rect;
+                        // Family stripe along the bottom edge: identity without a
+                        // heading, and it survives a mixed-family grid.
+                        let c = cluster_color(self.labels[i]);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(r.left(), r.bottom() - 3.0), r.right_bottom()),
+                            0.0, Color32::from_rgb(c[0], c[1], c[2]),
+                        );
+                        if self.persisted.contains(&i) {
+                            ui.painter().rect_filled(
+                                r, 3.0, Color32::from_rgba_unmultiplied(10, 25, 14, 90));
+                        }
+                        if self.flagged.contains(&i) {
+                            ui.painter().rect_stroke(r, 3.0,
+                                egui::Stroke::new(2.0, Color32::from_rgb(225, 180, 90)));
+                        }
+                        if sel {
+                            ui.painter().rect_stroke(r.expand(1.0), 3.0,
+                                egui::Stroke::new(2.0, ui_kit::ACCENT()));
+                            if self.scroll_to_selected {
+                                resp.scroll_to_me(Some(egui::Align::Center));
+                                self.scroll_to_selected = false;
                             }
-                            if self.multi_selected.contains(&i) {
-                                ui.painter().rect_stroke(resp.rect, 2.0,
-                                    egui::Stroke::new(2.0, Color32::from_rgb(80, 170, 255)));
-                            }
-                            if resp.clicked() {
-                                if ui.input(|inp| inp.modifiers.shift) {
-                                    // Range-select from the last-clicked tile to this
-                                    // one, in the gallery's own cluster-sorted order
-                                    // (`show_idxs`) — not insertion/region-id order.
-                                    let range = self.last_clicked_region.and_then(|anchor| {
-                                        let a = show_idxs.iter().position(|&x| x == anchor)?;
-                                        let b = show_idxs.iter().position(|&x| x == i)?;
-                                        Some((a.min(b), a.max(b)))
-                                    });
-                                    if let Some((lo, hi)) = range {
-                                        for &ri in &show_idxs[lo..=hi] {
-                                            self.multi_selected.insert(ri);
-                                        }
-                                    } else {
-                                        self.multi_selected.insert(i);
-                                    }
-                                } else if ui.input(|inp| inp.modifiers.ctrl) {
-                                    self.toggle_multi_select(i);
+                        }
+                        if self.multi_selected.contains(&i) {
+                            ui.painter().rect_stroke(r, 3.0,
+                                egui::Stroke::new(2.0, Color32::from_rgb(80, 170, 255)));
+                        }
+                        if resp.clicked() {
+                            if ui.input(|inp| inp.modifiers.shift) {
+                                let range = self.last_clicked_region.and_then(|a| {
+                                    let x = show_idxs.iter().position(|&v| v == a)?;
+                                    let y = show_idxs.iter().position(|&v| v == i)?;
+                                    Some((x.min(y), x.max(y)))
+                                });
+                                if let Some((lo, hi)) = range {
+                                    for &ri in &show_idxs[lo..=hi] { self.multi_selected.insert(ri); }
                                 } else {
-                                    self.selected_idx = Some(self.regions[i].leaf);
-                                    self.selected_cluster = Some(self.labels[i]);
-                                    self.selected_region = Some(i);
-                                    self.overlay_tex = None;
+                                    self.multi_selected.insert(i);
                                 }
-                                self.last_clicked_region = Some(i);
+                            } else if ui.input(|inp| inp.modifiers.ctrl) {
+                                self.toggle_multi_select(i);
+                            } else {
+                                self.selected_idx = Some(self.regions[i].leaf);
+                                self.selected_region = Some(i);
+                                self.overlay_tex = None;
                             }
-                            if resp.secondary_clicked() {
-                                self.remove_regions(&[i], toasts, true);
-                                self.multi_selected.remove(&i);
-                                if self.selected_region == Some(i) {
-                                    self.selected_region = None;
-                                }
-                            }
+                            self.last_clicked_region = Some(i);
+                        }
+                        if resp.secondary_clicked() {
+                            self.remove_regions(&[i], toasts, true);
+                            self.multi_selected.remove(&i);
+                            if self.selected_region == Some(i) { self.selected_region = None; }
                         }
                     }
                 });
-                ui.add_space(4.0);
-                idx = end;
+            });
+        // Ordering, paging and appearance-ranking sit BELOW the grid — they
+        // configure how it is presented, so they read as its footer rather than
+        // as a toolbar you pass through on the way in.
+        self.show_gallery_controls(ui, filtered.len(), n_pages, toasts);
+    }
+
+    /// The grid's footer: what order, which page, undo, and the ranking action.
+    fn show_gallery_controls(
+        &mut self, ui: &mut Ui, total: usize, n_pages: usize, toasts: &mut ToastManager,
+    ) {
+        ui.add_space(6.0);
+        // FIRST row: what is being shown, and by what signal.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            egui::ComboBox::from_id_salt("gallery_sort")
+                .selected_text(self.gallery_sort.label())
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for s in GallerySort::ALL {
+                        if ui.selectable_label(self.gallery_sort == s, s.label()).clicked() {
+                            self.gallery_sort = s;
+                            self.gallery_page = 0;
+                        }
+                    }
+                });
+            // Say which signal is actually in force — appearance ranking only
+            // exists once embeddings have been computed for these regions.
+            if self.gallery_sort == GallerySort::Unusual {
+                let exact = self.regions.iter().any(|r| !r.dino_embed.is_empty());
+                ui.label(RichText::new(if exact { "by appearance" } else { "by size (approx.)" })
+                    .small().color(ui_kit::MUTED()))
+                    .on_hover_text(if exact {
+                        "Ranked by how far each region's DINO embedding sits from its family's \
+                         centre — a real measure of \u{201c}this does not look like its siblings\u{201d}."
+                    } else {
+                        "No per-region embeddings for these yet — ranking falls back to how far \
+                         each region's size is from its family's median. Press \u{201c}Rank by \
+                         appearance\u{201d} for the real thing."
+                    });
             }
         });
+
+        // SECOND row. These used to share one wrapped row with the sort combo,
+        // which in a 300px panel broke as "combo, qualifier, ‹" then
+        // "1/3  ›  Undo" — the page arrows split across two lines with the page
+        // number orphaned from them. Splitting the rows by MEANING (what is
+        // shown / how to move through it) means the wrap can no longer cut
+        // through the middle of a control group.
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let n_flag = self.flagged.len();
+            if n_flag > 0 || self.filter_flagged {
+                if ui.selectable_label(self.filter_flagged, format!("Set aside ({n_flag})"))
+                    .on_hover_text("Show only the detections you pressed F on — a second pass \
+                                    for the hard calls, made when you are fresh.")
+                    .clicked()
+                {
+                    self.filter_flagged = !self.filter_flagged;
+                    self.gallery_page = 0;
+                }
+            }
+            if n_pages > 1 {
+                // Kept atomic in their own row: the three parts are one control
+                // and are meaningless apart. Narrow enough (~70px) that this
+                // non-wrapping row cannot push the panel wider.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui.small_button("‹").clicked() && self.gallery_page > 0 {
+                        self.gallery_page -= 1;
+                    }
+                    ui.label(RichText::new(format!("{}/{}", self.gallery_page + 1, n_pages))
+                        .small().color(ui_kit::MUTED()));
+                    if ui.small_button("›").clicked() && self.gallery_page + 1 < n_pages {
+                        self.gallery_page += 1;
+                    }
+                });
+            }
+            ui.add_enabled_ui(!self.struct_undo.is_empty(), |ui| {
+                if ui.small_button(format!("Undo ({})", self.struct_undo.len()))
+                    .on_hover_text("Reverse the last reject, confirm or cut. Ctrl+Z.")
+                    .clicked()
+                {
+                    self.undo_last_edit(toasts);
+                }
+            });
+        });
+
+        // Appearance ranking — the action that makes confirming a whole family
+        // defensible. Cost stated up front from the measured ~45 ms/region.
+        let to_rank = self.rank_targets().len();
+        if self.ranking {
+            ui.horizontal(|ui| {
+                ui_kit::busy(ui, &format!("ranking {}/{}", self.rank_done, self.rank_total));
+                if ui.small_button("Cancel").clicked() {
+                    self.rank_cancel.store(true, Ordering::Relaxed);
+                }
+            });
+            let frac = self.rank_done as f32 / self.rank_total.max(1) as f32;
+            ui.add(egui::ProgressBar::new(frac).desired_height(4.0));
+        } else if to_rank > 0 && self.selected_cluster.is_some() {
+            let busy = self.running || self.retraining || self.mining;
+            ui.add_enabled_ui(!busy && self.eff_dino().is_some(), |ui| {
+                let secs = (to_rank as f64 * 0.045).round().max(1.0) as u64;
+                if ui.button(format!("Rank {to_rank} by appearance  (~{secs}s)"))
+                    .on_hover_text(
+                        "Run DINO over each region in this family and re-order the grid so the \
+                         ones LEAST like the rest come first.\n\n\
+                         Cancellable; partial results are kept.")
+                    .on_disabled_hover_text("Needs the DINO model, and no other GPU job running.")
+                    .clicked()
+                {
+                    self.start_rank_appearance(toasts);
+                }
+            });
+        }
+        let _ = total;
     }
 
     /// Pipeline run log — moved here from the bottom of the folders panel
@@ -3499,7 +5740,10 @@ impl PipelineTab {
                 .small().color(Color32::GRAY));
             return;
         }
-        egui::ScrollArea::vertical().id_salt("pipeline_run_log").show(ui, |ui| {
+        // max_height, because this now renders inside the review panel's own
+        // scroll area — an unbounded nested scroller swallows the outer one's
+        // wheel events and the panel stops scrolling wherever the cursor is.
+        egui::ScrollArea::vertical().max_height(160.0).id_salt("pipeline_run_log").show(ui, |ui| {
             for line in self.log.iter().rev().take(500) {
                 ui.label(RichText::new(line).small());
             }
@@ -3531,6 +5775,12 @@ impl PipelineTab {
         self.persisted.clear();
         self.merged_away.clear();
         self.rejected_leaves.clear();
+        self.flagged.clear();
+        self.filter_flagged = false;
+        // NOT review_marks: those are the on-disk history, reloaded per run and
+        // re-applied as leaves arrive. Only the live per-index sets reset.
+        self.reviewed.clear();
+        self.review_mismatch = 0;
         self.cluster_names.clear();
         self.selected_cluster = None;
         self.selected_region = None;
@@ -3556,19 +5806,783 @@ impl PipelineTab {
         self.regions.get(i).map_or(true, |r| !self.rejected_leaves.contains(&r.leaf))
     }
 
+    /// Can this action do anything right now? Drives both the palette's greying
+    /// and whether a keypress should be swallowed.
+    fn action_enabled(&self, id: &str) -> bool {
+        match id {
+            "run.start"  => self.all_paths_ok() && self.source_count > 0
+                && !self.running && !self.retraining && !self.mining
+                && self.output_inside_source().is_none(),
+            "run.cancel" => self.running,
+            "review.export" => !self.regions.is_empty() && self.output_folder.is_some(),
+            // Only a navigation change, so it needs results to go and land on —
+            // but deliberately NOT a completed review. Leaving early is allowed.
+            "flow.finish" => !self.results.is_empty() && !self.running
+                && self.stage_view != StageView::Done,
+            "review.confirm_family" => self.selected_cluster.is_some(),
+            "review.undo" => !self.struct_undo.is_empty(),
+            "leaf.prev" | "leaf.next" | "leaf.next_unreviewed"
+            | "leaf.reviewed" | "leaf.reject" => !self.results.is_empty(),
+            "region.confirm" | "region.reject" | "region.reassign" =>
+                !self.effective_selection().is_empty(),
+            "view.recon" => self.selected_idx.and_then(|i| self.results.get(i))
+                .map_or(false, |l| !l.recon_mask.is_empty()),
+            "view.clear_focus" => self.selected_cluster.is_some(),
+            _ => true,
+        }
+    }
+
+    /// THE dispatch point. Keys, the palette and (where sensible) buttons all
+    /// route here, so an action cannot behave differently depending on how it was
+    /// invoked — which is exactly how `Enter` ended up meaning two things.
+    fn perform_action(&mut self, id: &str, toasts: &mut ToastManager) {
+        if !self.action_enabled(id) {
+            return;
+        }
+        match id {
+            "leaf.prev" | "leaf.next" => {
+                let n = self.results.len();
+                let next = id == "leaf.next";
+                let target = match self.selected_idx {
+                    None => 0,
+                    Some(cur) if next => (cur + 1).min(n - 1),
+                    Some(cur) => cur.saturating_sub(1),
+                };
+                if self.selected_idx != Some(target) {
+                    self.selected_idx = Some(target);
+                    self.selected_region = None;
+                    self.overlay_tex = None;
+                    self.scroll_to_leaf = true;
+                }
+            }
+            "leaf.next_unreviewed" => {
+                let from = self.selected_idx.map_or(0, |i| i + 1);
+                match self.next_unreviewed(from) {
+                    Some(t) => {
+                        self.selected_idx = Some(t);
+                        self.selected_region = None;
+                        self.overlay_tex = None;
+                        self.scroll_to_leaf = true;
+                    }
+                    None => toasts.success("Every leaf has been reviewed or rejected."),
+                }
+            }
+            "leaf.reviewed" => {
+                if let Some(li) = self.selected_idx { self.toggle_reviewed(li, toasts); }
+            }
+            "leaf.reject" => {
+                if let Some(li) = self.selected_idx { self.toggle_reject_leaf(li, toasts); }
+            }
+            "region.confirm" => {
+                let sel = self.effective_selection();
+                self.confirm_regions(&sel, toasts);
+            }
+            "region.reject" => {
+                let sel = self.effective_selection();
+                // write_reject = true: an explicit reject IS training signal
+                // ("the model was wrong here"), unlike an eraser stroke that
+                // merely empties a mask.
+                self.remove_regions(&sel, toasts, true);
+            }
+            "review.confirm_family" => {
+                if let Some(cid) = self.selected_cluster {
+                    let pending: Vec<usize> = (0..self.regions.len())
+                        .filter(|&i| self.region_visible(i) && self.labels[i] == cid
+                            && !self.persisted.contains(&i)
+                            && (!self.filter_leaf_only
+                                || self.selected_idx.map_or(true, |li| self.regions[i].leaf == li)))
+                        .collect();
+                    let n = pending.len();
+                    self.confirm_regions(&pending, toasts);
+                    toasts.success(format!("Confirmed {n} region(s)"));
+                }
+            }
+            "region.next" | "region.prev" => {
+                // Walk the SAME order the gallery is showing, so keyboard and eye
+                // agree — stepping in detection order while the grid is sorted by
+                // atypicality would be its own kind of confusing.
+                let order = self.gallery_order();
+                if order.is_empty() {
+                    return;
+                }
+                let cur = self.selected_region.and_then(|s| order.iter().position(|&i| i == s));
+                let next = match (cur, id == "region.next") {
+                    (None, _) => 0,
+                    (Some(p), true)  => (p + 1).min(order.len() - 1),
+                    (Some(p), false) => p.saturating_sub(1),
+                };
+                let target = order[next];
+                self.selected_region = Some(target);
+                // Follow the region onto its leaf, otherwise stepping past the
+                // end of one leaf's detections selects something invisible.
+                let leaf = self.regions[target].leaf;
+                if self.selected_idx != Some(leaf) {
+                    self.selected_idx = Some(leaf);
+                    self.scroll_to_leaf = true;
+                }
+                self.gallery_page = next / GALLERY_PER_PAGE;
+                self.scroll_to_selected = true;
+                self.overlay_tex = None;
+            }
+            "region.flag" => {
+                if let Some(i) = self.selected_region {
+                    if self.flagged.remove(&i) {
+                        toasts.info("Un-flagged");
+                    } else {
+                        self.flagged.insert(i);
+                        toasts.info("Set aside — find it again with the Flagged filter");
+                    }
+                }
+            }
+            "review.undo"   => self.undo_last_edit(toasts),
+            "review.export" => self.export_results(toasts),
+            "flow.finish" => self.stage_view = StageView::Done,
+            "run.start" => {
+                let (rev, rej, _) = self.review_counts();
+                if !self.results.is_empty() && (rev + rej > 0) {
+                    self.pending_reset = Some(PendingReset::Rerun);
+                } else {
+                    self.start();
+                }
+            }
+            "run.cancel" => self.cancel_flag.store(true, Ordering::Relaxed),
+            "view.outline" => { self.overlay_outline = !self.overlay_outline; self.overlay_tex = None; }
+            "view.recon"   => { self.show_recon = !self.show_recon; self.overlay_tex = None; }
+            "view.clear_focus" => {
+                self.selected_cluster = None;
+                self.selected_region = None;
+                self.overlay_tex = None;
+            }
+            "view.fit" => { self.canvas_zoom = 1.0; self.canvas_pan = egui::Vec2::ZERO; }
+            "view.panel" => self.setup_open = !self.setup_open,
+            "help"    => self.help_open = !self.help_open,
+            "palette" => { self.palette_open = true; self.palette_query.clear(); }
+            _ => {
+                // Tools: one arm rather than ten, since the id encodes the tool.
+                let tool = match id {
+                    "tool.select"       => Some(CanvasTool::Select),
+                    "tool.mark_healthy" => Some(CanvasTool::MarkHealthy),
+                    "tool.brush"        => Some(CanvasTool::Brush),
+                    "tool.eraser"       => Some(CanvasTool::Eraser),
+                    "tool.knife"        => Some(CanvasTool::Knife),
+                    "tool.scissor"      => Some(CanvasTool::Scissor),
+                    "tool.lasso"        => Some(CanvasTool::Lasso),
+                    "tool.wand"         => Some(CanvasTool::Wand),
+                    "tool.eyedropper"   => Some(CanvasTool::Eyedropper),
+                    "tool.polygon"      => Some(CanvasTool::Polygon),
+                    _ => None,
+                };
+                if let Some(t) = tool {
+                    self.switch_tool_hotkey(t);
+                }
+            }
+        }
+    }
+
+    /// Fuzzy-searchable list of every action, opened with Ctrl+K.
+    ///
+    /// This is the standard resolution of the expert-tool tension: a keyboard-
+    /// first interface is fast but undiscoverable, a menu-driven one is
+    /// discoverable but slow. A palette is both — and it teaches the binding by
+    /// printing it beside each command, which is the transfer mechanism that
+    /// actually moves people onto shortcuts.
+    fn show_command_palette(&mut self, ctx: &Context, toasts: &mut ToastManager) {
+        if !self.palette_open {
+            return;
+        }
+        // Rank once per frame; twenty-odd actions, so cost is irrelevant.
+        let mut hits: Vec<(i32, &'static shortcuts::ActionDef)> = shortcuts::ACTIONS.iter()
+            .filter_map(|a| {
+                let hay = format!("{} {}", a.label, a.group);
+                shortcuts::fuzzy_score(&hay, &self.palette_query).map(|s| (s, a))
+            })
+            .collect();
+        // Enabled actions first, then by score: an exact match you cannot run is
+        // less useful than a near match you can.
+        hits.sort_by_key(|(s, a)| (!self.action_enabled(a.id), -s));
+        self.palette_sel = self.palette_sel.min(hits.len().saturating_sub(1));
+
+        let mut run: Option<String> = None;
+        let mut close = false;
+
+        // Keys are read BEFORE the window so Enter/arrows drive the list rather
+        // than the text field.
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) { close = true; }
+            if i.key_pressed(egui::Key::ArrowDown) {
+                self.palette_sel = (self.palette_sel + 1).min(hits.len().saturating_sub(1));
+            }
+            if i.key_pressed(egui::Key::ArrowUp) {
+                self.palette_sel = self.palette_sel.saturating_sub(1);
+            }
+            if i.key_pressed(egui::Key::Enter) {
+                if let Some((_, a)) = hits.get(self.palette_sel) {
+                    run = Some(a.id.to_string());
+                }
+            }
+        });
+
+        egui::Window::new("Commands")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            // A real height. `fixed_size(_, 0.0)` collapsed the window to its
+            // minimum, so the scroll area inside got almost no room and showed
+            // two and a half rows — the palette's whole value is seeing the
+            // candidates at a glance.
+            .fixed_size(egui::vec2(520.0, 420.0))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+            .show(ctx, |ui| {
+                let te = ui.add(
+                    egui::TextEdit::singleline(&mut self.palette_query)
+                        .hint_text("Search commands…")
+                        .desired_width(f32::INFINITY),
+                );
+                if !self.palette_focused {
+                    te.request_focus();
+                    self.palette_focused = true;
+                }
+                if te.changed() {
+                    self.palette_sel = 0;
+                }
+                ui.add_space(4.0);
+                // One line per command, not two: two-line rows fit about four
+                // suggestions in the same space that now holds ten, and the whole
+                // value of a palette is seeing the candidates without scrolling.
+                // The group moves onto the same line, dimmed, and the hint moves
+                // to hover.
+                egui::ScrollArea::vertical()
+                    .max_height(340.0)
+                    .auto_shrink([false, false]) // fill the window instead of hugging content
+                    .id_salt("palette_list").show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    for (row, (_, a)) in hits.iter().enumerate() {
+                        let enabled = self.action_enabled(a.id);
+                        let selected = row == self.palette_sel;
+                        let key = self.keymap.key(a.id);
+                        let resp = ui.add_enabled(
+                            enabled,
+                            egui::SelectableLabel::new(selected, {
+                                let mut s = a.label.to_string();
+                                if !shortcuts::is_unbound(key) {
+                                    s.push_str(&format!("   [{}]", shortcuts::key_label(key)));
+                                }
+                                s.push_str(&format!("   ·  {}", a.group));
+                                RichText::new(s)
+                            }),
+                        ).on_hover_text(a.hint);
+                        if resp.clicked() {
+                            run = Some(a.id.to_string());
+                        }
+                    }
+                    if hits.is_empty() {
+                        ui.label(RichText::new("No command matches that.")
+                            .small().color(ui_kit::MUTED()));
+                    }
+                });
+                ui.add_space(2.0);
+                // Spelled out rather than "↑ ↓": those arrow glyphs are not in the
+                // bundled fonts and rendered as tofu boxes — the same gap that
+                // turned the reviewed-tick into a square.
+                ui.label(RichText::new(format!(
+                    "{} commands · Up/Down to move · Enter to run · Esc to close", hits.len()
+                )).small().color(ui_kit::MUTED()));
+            });
+
+        if let Some(id) = run {
+            self.perform_action(&id, toasts);
+            close = true;
+        }
+        if close {
+            self.palette_open = false;
+            self.palette_focused = false;
+            self.palette_query.clear();
+            self.palette_sel = 0;
+        }
+    }
+
+    /// Confirmation dialogs for the two irreversible actions — deleting a class
+    /// everywhere, and discarding a review session.
+    ///
+    /// Each states the exact scope ("this will affect N regions across M leaves")
+    /// rather than asking a generic "are you sure?", and neither makes the
+    /// destructive option the default button.
+    fn show_confirm_dialogs(&mut self, ctx: &Context, toasts: &mut ToastManager) {
+        if self.confirm_clear_curations {
+            let n = self.curation_row_count();
+            let dir = self.output_folder.as_ref().map(|o| o.join("curations"));
+            let mut decided = None;
+            egui::Window::new("Delete all curations?")
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_min_width(400.0);
+                    ui.label(RichText::new(format!(
+                        "{} curated example{} will be erased.",
+                        fmt_thousands(n), if n == 1 { "" } else { "s" })).strong());
+                    if let Some(d) = &dir {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(d.display().to_string())
+                            .small().color(ui_kit::MUTED()));
+                    }
+                    ui.add_space(4.0);
+                    ui.label("Every label, stamp and mined hard negative in this output \
+                              folder's curations/ is deleted. Detections in the current \
+                              run stay on screen — only the training record is cleared.");
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(
+                        "This cannot be undone, and no head file is changed: a head \
+                         already retrained from these curations keeps whatever it \
+                         learned. Reselect the original head if you need to undo that too.")
+                        .small().color(Color32::from_rgb(220, 150, 130)));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() { decided = Some(false); }
+                        if ui.add(egui::Button::new(
+                            RichText::new("Delete all curations").color(Color32::WHITE))
+                            .fill(Color32::from_rgb(170, 55, 55))).clicked()
+                        {
+                            decided = Some(true);
+                        }
+                    });
+                });
+            match decided {
+                Some(true)  => { self.clear_curations(toasts); self.confirm_clear_curations = false; }
+                Some(false) => { self.confirm_clear_curations = false; }
+                None => {}
+            }
+        }
+        if let Some(cid) = self.pending_delete_cluster {
+            let name = self.class_display_name(cid);
+            let n = self.regions.iter().enumerate()
+                .filter(|(i, r)| self.labels.get(*i) == Some(&cid) && self.region_visible(*i)
+                    && self.results.get(r.leaf).is_some())
+                .count();
+            let mut decided = None;
+            egui::Window::new("Delete this class?")
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_min_width(380.0);
+                    ui.label(RichText::new(format!("\u{201c}{name}\u{201d}")).strong());
+                    ui.add_space(4.0);
+                    ui.label(format!(
+                        "Every curated example of this class on disk is rewritten to \
+                         \u{201c}rejected\u{201d}, and the class is removed from the head file. \
+                         {n} region(s) in this run carry it."
+                    ));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(
+                        "This cannot be undone. The .json.bak beside the head is best-effort \
+                         and may not exist.")
+                        .small().color(Color32::from_rgb(220, 150, 130)));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Keep it").clicked() { decided = Some(false); }
+                        if ui.add(egui::Button::new(
+                            RichText::new("Delete everywhere").color(Color32::WHITE))
+                            .fill(Color32::from_rgb(170, 55, 55))).clicked()
+                        {
+                            decided = Some(true);
+                        }
+                    });
+                });
+            match decided {
+                Some(true)  => { self.delete_cluster_from_head(cid, toasts);
+                                 self.pending_delete_cluster = None; }
+                Some(false) => { self.pending_delete_cluster = None; }
+                None => {}
+            }
+        }
+
+        if let Some(kind) = self.pending_reset {
+            let (rev, rej, tot) = self.review_counts();
+            let mut decided = None;
+            egui::Window::new("Discard this review session?")
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_min_width(400.0);
+                    ui.label(match kind {
+                        PendingReset::Rerun =>
+                            "Running the pipeline again clears the results currently loaded.",
+                        PendingReset::SwitchHead =>
+                            "Switching to the retrained head clears the results currently loaded.",
+                    });
+                    ui.add_space(4.0);
+                    ui.label(format!(
+                        "{tot} leaves are loaded \u{2014} {rev} marked reviewed, {rej} rejected. \
+                         The undo stack and which leaf you were on are lost."
+                    ));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(
+                        "Confirmed curations and the reviewed/rejected marks are already on \
+                         disk and will be restored on the next run.")
+                        .small().color(ui_kit::MUTED()));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Stay here").clicked() { decided = Some(false); }
+                        if ui.button("Discard and continue").clicked() { decided = Some(true); }
+                    });
+                });
+            match decided {
+                Some(true) => {
+                    match kind {
+                        PendingReset::Rerun => { self.pending_reset = None; self.start(); }
+                        PendingReset::SwitchHead => {
+                            self.pending_reset = None;
+                            self.reset_run_state();
+                            toasts.info("Switched to the retrained head — click Run Pipeline to see corrected results.");
+                        }
+                    }
+                }
+                Some(false) => { self.pending_reset = None; }
+                None => {}
+            }
+        }
+    }
+
+    /// The keyboard-shortcuts window: every binding, what it does, whether it has
+    /// been customised, click-to-rebind, and one button back to defaults.
+    ///
+    /// Rendered from `shortcuts::ACTIONS`, so it cannot fall out of step with what
+    /// the keys actually do — the previous arrangement documented bindings in code
+    /// comments and a couple of tooltips, which is how `Enter` ended up bound twice
+    /// without anyone noticing.
+    fn show_shortcuts_window(&mut self, ctx: &Context) {
+        if !self.help_open {
+            self.rebinding = None;
+            return;
+        }
+        let mut open = self.help_open;
+
+        // Capture a keypress for the action awaiting one. Done before the window so
+        // Escape can cancel without the window's own widgets seeing the key first.
+        if let Some(id) = self.rebinding.clone() {
+            let pressed = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, .. } => Some(*key),
+                    _ => None,
+                })
+            });
+            if let Some(k) = pressed {
+                if k != egui::Key::Escape {
+                    self.keymap.set(&id, k);
+                }
+                self.rebinding = None;
+            }
+        }
+
+        egui::Window::new("Keyboard shortcuts")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                let conflicts = self.keymap.conflicts();
+                if !conflicts.is_empty() {
+                    for (k, ids) in &conflicts {
+                        let names: Vec<&str> = ids
+                            .iter()
+                            .filter_map(|id| shortcuts::action(id).map(|a| a.label))
+                            .collect();
+                        ui.label(
+                            RichText::new(format!(
+                                "Conflict: {} is bound to {} actions: {}",
+                                shortcuts::key_label(*k), ids.len(), names.join(", ")
+                            ))
+                            .small()
+                            .color(Color32::from_rgb(220, 170, 90)),
+                        )
+                        .on_hover_text(
+                            "Not necessarily wrong — two actions can share a key when they are \
+                             never active at the same time. Shown so you can decide, rather than \
+                             the app refusing a binding it cannot prove is a mistake.",
+                        );
+                    }
+                    ui.add_space(4.0);
+                }
+
+                if self.rebinding.is_some() {
+                    ui.label(
+                        RichText::new("Press any key…  (Esc cancels)")
+                            .strong().color(ui_kit::ACCENT()),
+                    );
+                    ui.add_space(4.0);
+                }
+
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .id_salt("shortcut_list")
+                    .show(ui, |ui| {
+                        let mut last_group = "";
+                        // ACTIONS is ordered most-used first; render in that order
+                        // rather than alphabetically so the list teaches priority.
+                        for a in shortcuts::ACTIONS {
+                            if a.group != last_group {
+                                if !last_group.is_empty() {
+                                    ui.add_space(6.0);
+                                }
+                                ui_kit::section_header(ui, a.group);
+                                last_group = a.group;
+                            }
+                            ui.horizontal(|ui| {
+                                let capturing = self.rebinding.as_deref() == Some(a.id);
+                                let label = if capturing {
+                                    "…".to_string()
+                                } else {
+                                    shortcuts::key_label(self.keymap.key(a.id)).to_string()
+                                };
+                                let mut btn = egui::Button::new(
+                                    RichText::new(label).monospace().strong(),
+                                );
+                                if capturing {
+                                    btn = btn.fill(ui_kit::ACCENT());
+                                }
+                                if ui
+                                    .add_sized([64.0, 22.0], btn)
+                                    .on_hover_text("Click, then press the key you want.")
+                                    .clicked()
+                                {
+                                    self.rebinding = Some(a.id.to_string());
+                                }
+                                ui.label(a.label).on_hover_text(a.hint);
+                                if !self.keymap.is_default(a.id) {
+                                    ui.label(
+                                        RichText::new("changed").small().color(ui_kit::MUTED()),
+                                    )
+                                    .on_hover_text(format!(
+                                        "Default: {}",
+                                        shortcuts::key_label(a.default_key)
+                                    ));
+                                    if ui.small_button("reset").on_hover_text("Back to default").clicked()
+                                    {
+                                        self.keymap.reset_one(a.id);
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let n = self.keymap.n_customised();
+                    if ui
+                        .add_enabled(n > 0, egui::Button::new("Reset all to defaults"))
+                        .on_hover_text("Discards every custom binding and restores the shipped set.")
+                        .on_disabled_hover_text("Nothing has been customised.")
+                        .clicked()
+                    {
+                        self.keymap.reset_all();
+                        self.rebinding = None;
+                    }
+                    ui.label(
+                        RichText::new(if n == 0 {
+                            "all defaults".to_string()
+                        } else {
+                            format!("{n} customised")
+                        })
+                        .small()
+                        .color(ui_kit::MUTED()),
+                    );
+                });
+                ui.label(
+                    RichText::new(
+                        "Shortcuts are inactive while a text field has focus, so typing a \
+                         cluster name never triggers one.",
+                    )
+                    .small()
+                    .color(ui_kit::MUTED()),
+                );
+            });
+
+        self.help_open = open;
+        if !self.help_open {
+            self.rebinding = None;
+        }
+    }
+
+    // ── review state: survives closing the app ────────────────────────────
+    //
+    // Written to `<output>/review_state.jsonl`, append-only, last line per key
+    // wins. Append-only rather than rewrite-in-place so a crash mid-write costs
+    // one line instead of the whole file, matching the `labels.jsonl` convention
+    // that already works for curations.
+
+    /// Stable identity of a leaf: its source photo relative to the source folder,
+    /// plus which leaf it was within that photo. `None` when the source folder is
+    /// unknown or the path lies outside it — in which case the leaf simply is not
+    /// persisted, rather than being written under a key that won't match later.
+    fn leaf_key(&self, li: usize) -> Option<(String, u32)> {
+        let leaf = self.results.get(li)?;
+        let root = self.source_folder.as_ref()?;
+        let rel = leaf.src.strip_prefix(root).unwrap_or(&leaf.src);
+        // Forward slashes so a state file stays valid if the project is opened
+        // from a different OS or a moved drive letter.
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let ordinal = self.results[..li].iter().filter(|l| l.src == leaf.src).count() as u32;
+        Some((rel, ordinal))
+    }
+
+    fn review_state_path(&self) -> Option<PathBuf> {
+        Some(self.output_folder.as_ref()?.join("review_state.jsonl"))
+    }
+
+    /// Read the whole file into `review_marks`, later lines overwriting earlier
+    /// ones for the same key. Called once when a run starts, before any leaf
+    /// arrives, so marks can be applied as leaves stream in.
+    fn load_review_state(&mut self) {
+        self.review_marks.clear();
+        self.review_mismatch = 0;
+        let Some(p) = self.review_state_path() else { return };
+        let Ok(text) = std::fs::read_to_string(&p) else { return };
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            let (Some(src), Some(n), Some(state)) = (
+                v.get("src").and_then(|x| x.as_str()),
+                v.get("n").and_then(|x| x.as_u64()),
+                v.get("state").and_then(|x| x.as_str()),
+            ) else { continue };
+            let w = v.get("w").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let h = v.get("h").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            self.review_marks
+                .insert((src.to_string(), n as u32), (state.to_string(), w, h));
+        }
+    }
+
+    /// Apply any stored mark to a leaf that has just arrived.
+    ///
+    /// The stored width/height are a fingerprint of the segmentation that produced
+    /// the mark. If they disagree, the leaf under this key is not the leaf the
+    /// user reviewed — so the mark is COUNTED and DROPPED rather than applied.
+    /// Silently restoring it would put a "reviewed" tick on a leaf nobody has
+    /// seen, which is worse than losing the tick.
+    fn apply_review_mark(&mut self, li: usize) {
+        let Some(key) = self.leaf_key(li) else { return };
+        let Some((state, w, h)) = self.review_marks.get(&key).cloned() else { return };
+        let Some(leaf) = self.results.get(li) else { return };
+        if w != 0 && h != 0 && (w != leaf.w || h != leaf.h) {
+            self.review_mismatch += 1;
+            return;
+        }
+        match state.as_str() {
+            "reviewed" => { self.reviewed.insert(li); }
+            "rejected" => { self.rejected_leaves.insert(li); }
+            _ => {}
+        }
+    }
+
+    /// Append one line. Best-effort by nature (a review bookmark is not worth
+    /// interrupting a session over), but unlike the curation writes this one
+    /// reports failure instead of pretending it succeeded.
+    fn write_review_mark(&mut self, li: usize, state: &str, toasts: &mut ToastManager) {
+        let (Some(key), Some(path)) = (self.leaf_key(li), self.review_state_path()) else { return };
+        let Some(leaf) = self.results.get(li) else { return };
+        let line = format!(
+            "{{\"src\":\"{}\",\"n\":{},\"state\":\"{}\",\"w\":{},\"h\":{}}}\n",
+            json_escape(&key.0), key.1, state, leaf.w, leaf.h,
+        );
+        use std::io::Write;
+        let res = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&path)
+            .and_then(|mut f| f.write_all(line.as_bytes()));
+        if let Err(e) = res {
+            toasts.error(format!("could not save review state: {e}"));
+        }
+        self.review_marks.insert(key, (state.to_string(), leaf.w, leaf.h));
+    }
+
+    /// Toggle "I have looked at this leaf and I'm happy with it".
+    ///
+    /// Refuses on a rejected leaf rather than silently un-rejecting it: the
+    /// button is hidden in that state, so having the hotkey quietly do something
+    /// the UI does not offer would make M destroy a rejection by accident.
+    fn toggle_reviewed(&mut self, li: usize, toasts: &mut ToastManager) {
+        if self.rejected_leaves.contains(&li) {
+            toasts.info(format!("Leaf {li} is rejected — press X to restore it first."));
+            return;
+        }
+        if self.reviewed.remove(&li) {
+            self.write_review_mark(li, "none", toasts);
+        } else {
+            self.reviewed.insert(li);
+            self.write_review_mark(li, "reviewed", toasts);
+        }
+        self.overlay_tex = None;
+    }
+
+    /// First leaf at or after `from` that is neither reviewed nor rejected.
+    /// Wraps once so the search covers the whole batch from wherever you are.
+    fn next_unreviewed(&self, from: usize) -> Option<usize> {
+        let n = self.results.len();
+        (0..n)
+            .map(|off| (from + off) % n)
+            .find(|i| !self.reviewed.contains(i) && !self.rejected_leaves.contains(i))
+    }
+
+    fn review_counts(&self) -> (usize, usize, usize) {
+        (self.reviewed.len(), self.rejected_leaves.len(), self.results.len())
+    }
+
     /// Toggle whole-leaf rejection. Reversible on purpose — it is one click in a
     /// top bar, next to the destructive-looking controls, and an accidental press
     /// would otherwise silently drop a leaf's anomalies from the export with no
     /// way back short of re-running the pipeline.
     fn toggle_reject_leaf(&mut self, li: usize, toasts: &mut ToastManager) {
         if self.rejected_leaves.remove(&li) {
+            self.write_review_mark(li, "none", toasts);
             toasts.success(format!("Leaf {li} restored"));
         } else {
             self.rejected_leaves.insert(li);
+            // A rejected leaf is not also "reviewed" — see toggle_reviewed.
+            self.reviewed.remove(&li);
             let n = self.regions.iter().filter(|r| r.leaf == li).count();
+            self.write_review_mark(li, "rejected", toasts);
             toasts.success(format!("Leaf {li} rejected — {n} anomalies excluded"));
         }
         self.overlay_tex = None;  // canvas overlay is cached; force a repaint
+    }
+
+    /// Is the output folder the source folder, or nested inside it?
+    ///
+    /// `segment_one` writes every leaf as `{stem}_leafNN.png` into the output
+    /// folder ([leaf_seg/inference.rs] `cutout_path`), and `list_images` walks the
+    /// source folder RECURSIVELY (walkdir). So an output at or under the source
+    /// means the next run scans its own cutouts as if they were new photographs,
+    /// segments cutouts of cutouts, and duplicates every leaf — reported from the
+    /// field as "2 leaves became 4 after rerunning".
+    ///
+    /// It also quietly breaks review state, because the duplicates are new leaves
+    /// with their own keys, so progress appears to reset.
+    ///
+    /// Returns the explanation to show, or `None` when the folders are fine.
+    fn output_inside_source(&self) -> Option<String> {
+        let (src, out) = (self.source_folder.as_ref()?, self.output_folder.as_ref()?);
+        // Canonicalize so `.\out` vs `out` and differing case on Windows still
+        // compare equal; fall back to the raw path when the folder is not yet
+        // created, which is the common case for a fresh output folder.
+        let s = src.canonicalize().unwrap_or_else(|_| src.clone());
+        let o = out.canonicalize().unwrap_or_else(|_| out.clone());
+        if o == s {
+            Some(format!(
+                "Both are {}.\n\nEach run writes its leaf cut-outs into the output \
+                 folder, and the source folder is scanned recursively — so the next \
+                 run would treat those cut-outs as new photographs and duplicate \
+                 every leaf. Choose an output folder outside the source folder.",
+                s.display()
+            ))
+        } else if o.starts_with(&s) {
+            Some(format!(
+                "Output {} sits under source {}.\n\nThe source scan is recursive, so \
+                 the leaf cut-outs written there would be picked up as new \
+                 photographs on the next run and every leaf would be duplicated. \
+                 Choose an output folder outside the source folder.",
+                o.display(), s.display()
+            ))
+        } else {
+            None
+        }
     }
 
     fn all_paths_ok(&self) -> bool {
@@ -3613,11 +6627,15 @@ impl PipelineTab {
             return;
         }
         self.reset_run_state();
+        // Load BEFORE the worker starts: leaves stream in one at a time and each
+        // applies its own mark on arrival, so the table has to be populated first.
+        self.load_review_state();
         self.log.clear();
         self.cancel_flag = Arc::new(AtomicBool::new(false));
         self.progress_done = 0;
         self.progress_total = image_paths.len();
         self.running = true;
+        self.run_started_at = Some(std::time::Instant::now());
         self.stage = "Loading models".into();
 
         let (tx, rx) = mpsc::channel();
@@ -3659,39 +6677,119 @@ impl PipelineTab {
         );
     }
 
-    fn start_preview(&mut self) {
-        let (Some(yolo), Some(src)) = (self.eff_yolo(), self.source_folder.clone()) else { return };
-        let images = crate::tabs::leaf_seg::inference::list_images(&src);
-        let Some(first) = images.into_iter().next() else {
-            self.preview_note = "No source images found.".into();
-            return;
-        };
-        let (alpha_lo, chroma_min) = (self.seg_alpha_lo, self.seg_chroma_min);
-        let (tx, rx) = mpsc::channel();
-        self.preview_rx = Some(rx);
-        self.preview_busy = true;
-        self.preview_note = "Running YOLO on the first image…".into();
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::tabs::leaf_seg::inference::preview_cutout(&yolo, &first, alpha_lo, chroma_min));
-        });
+    /// Find the retrain base set in `models/` without the user picking it.
+    ///
+    /// It is a ~1.2 GB export that is the same for every run, so making it a
+    /// manual per-session choice only created a way to forget it — and a retrain
+    /// with no base set silently drops the head's retained IoU from 0.475 to
+    /// 0.125. Uses the same search order as the model weights.
+    fn default_base_set() -> Option<PathBuf> {
+        Self::base_set_candidates().into_iter().find(|p| p.exists())
     }
 
-    fn poll_preview(&mut self, ctx: &Context) {
-        if self.preview_busy { ctx.request_repaint(); }
-        let msg = self.preview_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        if let Some(res) = msg {
-            self.preview_busy = false;
-            self.preview_rx = None;
-            match res {
-                Ok((rgba, w, h)) => {
-                    let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-                    self.preview_tex = Some(ctx.load_texture("seg_preview", ci, egui::TextureOptions::LINEAR));
-                    self.preview_note =
-                        format!("Preview {w}×{h} — tune the sliders + re-preview; happy → Run Pipeline.");
+    /// Every path checked for the base set, in order. Also drives the warning's
+    /// hover text — "not found" is only actionable if it says where it looked.
+    fn base_set_candidates() -> Vec<PathBuf> {
+        if let Ok(p) = std::env::var("LACUNA_BASE_SET") {
+            return vec![PathBuf::from(p)];
+        }
+        let mut out = Vec::new();
+        for name in BASE_SET_NAMES {
+            // Next to the executable first: that is the packaged layout, and it
+            // is the only one that does not depend on the working directory.
+            if let Some(exe) = crate::paths::exe_dir() {
+                out.push(exe.join("models").join(name));
+                // `target/release/lacuna.exe` -> repo `models/`, so a cargo build
+                // run from anywhere still finds it.
+                if let Some(repo) = exe.parent().and_then(|p| p.parent()) {
+                    out.push(repo.join("models").join(name));
                 }
-                Err(e) => self.preview_note = format!("Preview failed: {e}"),
+            }
+            out.push(PathBuf::from("models").join(name));
+        }
+        out
+    }
+
+    /// Erase the output folder's curation record.
+    ///
+    /// Deletes the whole `curations/` tree — `labels.jsonl`, the label crops, and
+    /// the mined hard negatives — because a partial delete is what produces a
+    /// contaminated folder in the first place: a `labels.jsonl` line whose PNG is
+    /// gone, or an orphan PNG no line refers to.
+    ///
+    /// The healthy-tile feature cache is deliberately kept: it is derived from
+    /// image data, not from labels, so it is not part of the contamination and
+    /// re-extracting it costs a full DINO pass over every tile.
+    fn clear_curations(&mut self, toasts: &mut ToastManager) {
+        let Some(out) = self.output_folder.clone() else { return };
+        let dir = out.join("curations");
+        if !dir.exists() {
+            toasts.info("Nothing to delete — no curations folder in this output folder.");
+            return;
+        }
+        let cache = dir.join("healthy_feature_cache");
+        let keep = cache.exists().then(|| out.join(".lacuna_feature_cache_tmp"));
+        if let Some(tmp) = &keep {
+            let _ = std::fs::remove_dir_all(tmp);
+            if std::fs::rename(&cache, tmp).is_err() {
+                // Could not park it — better to keep everything than to delete a
+                // cache the user did not ask to lose.
+                toasts.error("Could not move the feature cache aside; nothing was deleted.");
+                return;
             }
         }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                let _ = std::fs::create_dir_all(&dir);
+                if let Some(tmp) = &keep {
+                    let _ = std::fs::rename(tmp, &cache);
+                }
+                self.curation_count_cache = None;
+                toasts.success("Curations deleted — the flywheel starts clean.");
+            }
+            Err(e) => {
+                if let Some(tmp) = &keep {
+                    let _ = std::fs::rename(tmp, &cache);
+                }
+                toasts.error(format!("Could not delete curations: {e}"));
+            }
+        }
+    }
+
+    /// Number of curated examples accumulated in the current output folder.
+    ///
+    /// One `labels.jsonl` line per example. Cached on (len, mtime): this is read
+    /// from draw code, and the file grows to tens of thousands of lines.
+    fn curation_row_count(&mut self) -> usize {
+        let Some(out) = self.output_folder.clone() else { return 0 };
+        let path = out.join("curations").join("labels.jsonl");
+        let Ok(meta) = std::fs::metadata(&path) else {
+            self.curation_count_cache = None;
+            return 0;
+        };
+        let key = (meta.len(), meta.modified().ok());
+        if let Some((len, mtime, n)) = &self.curation_count_cache {
+            if (*len, *mtime) == key {
+                return *n;
+            }
+        }
+        let n = std::fs::read_to_string(&path)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        self.curation_count_cache = Some((key.0, key.1, n));
+        n
+    }
+
+    /// The base-row count a retrain will actually use.
+    fn effective_base_rows(&mut self) -> usize {
+        if !self.retrain_auto_base_rows {
+            return self.retrain_base_rows;
+        }
+        // Floor at the measured-best 10k, then hold ~10 base rows per curated
+        // example so the balance does not drift as curations accumulate. Capped
+        // so a very large curation set cannot make every retrain unbearable —
+        // retrain re-featurizes each row from scratch.
+        (self.curation_row_count() * 10).clamp(10_000, 100_000)
     }
 
     /// Picks the next source image (cycling through the folder on repeated
@@ -4007,6 +7105,10 @@ impl PipelineTab {
     fn poll_worker(&mut self, toasts: &mut ToastManager) {
         let mut finished = false;
         let mut got_clusters = false;
+        // Leaves that arrived this frame. Their stored review marks are applied
+        // AFTER the loop: the loop holds `&self.rx` for its whole body, so no
+        // `&mut self` method can be called inside it.
+        let mut arrived: Vec<usize> = Vec::new();
         if let Some(rx) = &self.rx {
             for msg in rx.try_iter().take(64) {
                 match msg {
@@ -4024,6 +7126,7 @@ impl PipelineTab {
                         self.leaf_valid_px.push(vp.max(1));
                         self.results.push(leaf);
                         self.thumbs.push(None);
+                        arrived.push(self.results.len() - 1);
                     }
                     PipeMsg::Clusters { labels, coords, names, regions, hcluster } => {
                         self.region_thumbs = vec![None; regions.len()];
@@ -4064,12 +7167,16 @@ impl PipelineTab {
                 }
             }
         }
+        for li in arrived {
+            self.apply_review_mark(li);
+        }
         if got_clusters {
             self.build_clusters(toasts);
             self.overlay_tex = None; // rebuild to reflect cluster colours
         }
         if finished {
             self.running = false;
+            self.run_started_at = None;
             self.rx = None;
             toasts.success(format!("Pipeline done — {} leaves, {} clusters", self.results.len(), self.clusters.len()));
         }
@@ -4087,6 +7194,9 @@ impl PipelineTab {
         let (Some(out), Some(head), Some(dino)) =
             (self.output_folder.clone(), self.eff_head(), self.eff_dino())
         else { return };
+        // Resolved BEFORE the config literal: in auto mode this reads the
+        // curation file, which needs &mut self for the count cache.
+        let base_rows = self.effective_base_rows();
         let curations_dir = out.join("curations");
         let out_path = head.parent().map(|p| p.join("fewshot_head_retrained.json"))
             .unwrap_or_else(|| PathBuf::from("fewshot_head_retrained.json"));
@@ -4126,7 +7236,7 @@ impl PipelineTab {
                 cold_start: self.retrain_cold_start,
                 dump_dir: self.retrain_dump.then(|| out.join("retrain_diag")),
                 base_set: self.retrain_base_set.clone(),
-                base_rows: self.retrain_base_rows,
+                base_rows,
                 anchor: self.retrain_anchor,
             },
             tx,
@@ -4206,6 +7316,13 @@ impl PipelineTab {
             });
             if self.mining {
                 ui_kit::busy(ui, &format!("mining… {} found", self.mine_found));
+                if ui.small_button("Cancel")
+                    .on_hover_text("Stop mining. Hard negatives already written to the curation \
+                                    set are kept — they are appended as they are found.")
+                    .clicked()
+                {
+                    self.mine_cancel.store(true, Ordering::Relaxed);
+                }
             }
         });
         if self.mining && self.mine_progress_total > 0 {
@@ -4454,8 +7571,16 @@ impl PipelineTab {
         for (t, (crop_bytes, crop_size, mask_png)) in tiles.into_iter().enumerate() {
             let stem = if n_tiles == 1 { format!("region_{idx}") } else { format!("region_{idx}_tile{t}") };
             let fname = format!("{stem}.png");
+            // Track the crop write instead of discarding it: `persisted.insert`
+            // below used to run unconditionally, so a full disk or a read-only
+            // share marked the region confirmed in the UI with nothing on disk.
+            // That is the worst possible failure for a curation set — it is
+            // discovered months later, if ever.
             if let Some(img) = image::RgbaImage::from_raw(crop_size, crop_size, crop_bytes) {
-                let _ = img.save(labels_dir.join(&fname));
+                if let Err(e) = img.save(labels_dir.join(&fname)) {
+                    toasts.error(format!("could not write crop {fname}: {e}"));
+                    return;
+                }
             }
             let mask_fname = format!("{stem}_mask.png");
             let mask_saved = mask_png.map(|m| m.save(labels_dir.join(&mask_fname)).is_ok()).unwrap_or(false);
@@ -4467,11 +7592,14 @@ impl PipelineTab {
         }
 
         use std::io::Write;
+        // `persisted` is only marked once the bytes are actually down. It is the
+        // set that drives "fully reviewed", which gates mining — so a row claimed
+        // as written but absent would feed the miner a leaf it has no labels for.
         match std::fs::OpenOptions::new().create(true).append(true).open(&jsonl_path) {
-            Ok(mut f) => {
-                let _ = f.write_all(lines.as_bytes());
-                self.persisted.insert(idx);
-            }
+            Ok(mut f) => match f.write_all(lines.as_bytes()) {
+                Ok(()) => { self.persisted.insert(idx); }
+                Err(e) => toasts.error(format!("labels.jsonl write failed: {e}")),
+            },
             Err(e) => toasts.error(format!("labels.jsonl: {e}")),
         }
     }
@@ -4481,12 +7609,24 @@ impl PipelineTab {
     /// touches `labels`/`removed` (a confirmed region's family is just
     /// whatever it already is); it only catches disk state up to what's shown.
     fn confirm_regions(&mut self, ids: &[usize], toasts: &mut ToastManager) {
+        // Record only what this call actually creates, so undo takes back exactly
+        // what it wrote — never a curation that already existed.
+        let mut newly: Vec<usize> = Vec::new();
         for &i in ids {
             if !self.region_visible(i) { continue; }
             let cid = self.labels[i];
             if cid < 0 { continue; } // nothing meaningful to confirm yet
+            let was = self.persisted.contains(&i);
             let family = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
             self.persist_region(i, &family, false, toasts);
+            // persist_region only inserts on a successful write, so this also
+            // means a failed write leaves nothing on the undo stack to retract.
+            if !was && self.persisted.contains(&i) {
+                newly.push(i);
+            }
+        }
+        if !newly.is_empty() {
+            self.push_undo(UndoEntry::Confirm(newly));
         }
     }
 
@@ -4508,7 +7648,7 @@ impl PipelineTab {
             .collect();
         let n = ids.len();
         self.confirm_regions(&ids, toasts);
-        toasts.success(format!("Confirmed {n} remaining region(s) → curations/"));
+        toasts.success(format!("Confirmed {n} remaining region(s) -> curations/"));
     }
 
     /// Flywheel, drag capture: crop the exact leaf-pixel rect `[lx0,ly0]..[lx1,ly1]`
@@ -4643,7 +7783,7 @@ impl PipelineTab {
     /// (one row per anomaly = cluster + region stats + Recon % + the leaf's
     /// morphology), `crops/` (each anomaly image) and `leaves/` (each leaf with
     /// anomalies colour-coded by family).
-    fn export_results(&self, toasts: &mut ToastManager) {
+    fn export_results(&mut self, toasts: &mut ToastManager) {
         let Some(out) = self.output_folder.clone() else {
             toasts.error("Set an output folder first.");
             return;
@@ -4655,21 +7795,61 @@ impl PipelineTab {
         let dir = out.join("export");
         let crops_dir = dir.join("crops");
         let leaves_dir = dir.join("leaves");
-        if std::fs::create_dir_all(&crops_dir).and(std::fs::create_dir_all(&leaves_dir)).is_err() {
+        // Only create crops/ when it will actually be filled — an empty crops/
+        // folder next to the results reads as "the crops failed", not "crops
+        // were deliberately skipped".
+        let dirs_ok = std::fs::create_dir_all(&dir).is_ok()
+            && (!self.export_overlays || std::fs::create_dir_all(&leaves_dir).is_ok())
+            && (!self.export_crops || std::fs::create_dir_all(&crops_dir).is_ok());
+        if !dirs_ok {
             toasts.error("could not create export folder");
             return;
         }
 
+        // `leaf` is a 0-based index into this run's leaves and says nothing about
+        // which photograph a leaf came from — with several leaves per photo,
+        // "leaf 7" is unresolvable without grouping by leaf_src by hand. Three
+        // columns fix that:
+        //
+        //   image          the photograph's file stem
+        //   leaf_in_image  1-based leaf number WITHIN that photograph
+        //   leaf_file      the cut-out's own filename stem, so a row joins
+        //                  directly to the PNG that `segment_one` wrote
+        //                  (`{stem}_leaf{NN}.png`, 0-based to match the file)
+        //
+        // `leaf` itself keeps its meaning so existing scripts still work.
         let mut csv = String::from(
-            "leaf,leaf_src,region,cluster_id,family,area_px,pct_leaf,recon_pct,lost_tissue_pct,\
+            "leaf,image,leaf_in_image,leaf_file,leaf_src,region,cluster_id,family,\
+             area_px,pct_leaf,recon_pct,lost_tissue_pct,\
              bbox_x,bbox_y,bbox_w,bbox_h,crop_file,\
              ec_length,ec_width,ec_area,ec_shape_index,ec_circularity,ec_entropy,ec_outline,\
              mc_length,mc_width,mc_area,mc_shape_index,mc_circularity,mc_entropy,mc_outline\n",
         );
+        // Ordinal of each leaf within its own photograph, computed once. Same
+        // definition the review-state file uses, so the two agree.
+        let mut ordinal: Vec<usize> = Vec::with_capacity(self.results.len());
+        {
+            let mut seen: HashMap<&std::path::Path, usize> = HashMap::new();
+            for l in &self.results {
+                let e = seen.entry(l.src.as_path()).or_insert(0);
+                ordinal.push(*e);
+                *e += 1;
+            }
+        }
         let mut n = 0usize;
+        let mut pending_crops: Vec<(usize, String)> = Vec::new();
+        // Per-(leaf, family) tallies for the WIDE format. Always accumulated —
+        // it costs one hash insert per region and keeps the two formats reading
+        // the exact same filtered set of regions, so the numbers cannot diverge.
+        let mut agg: HashMap<(usize, i32), (usize, u64)> = HashMap::new();
         for (i, r) in self.regions.iter().enumerate() {
             if !self.region_visible(i) {
                 continue;
+            }
+            {
+                let e = agg.entry((r.leaf, self.labels[i])).or_insert((0, 0));
+                e.0 += 1;
+                e.1 += self.region_area.get(i).copied().unwrap_or(0) as u64;
             }
             let cid = self.labels[i];
             let fam = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
@@ -4690,12 +7870,28 @@ impl PipelineTab {
                 String::new()
             };
             let [bx, by, bw, bh] = r.bbox_leaf;
+            // The filename stays in the CSV even when the PNG isn't written: it
+            // identifies the region, and blanking the column would break any
+            // downstream script that reads it. A later export with crops on
+            // produces exactly these names.
             let crop_file = format!("{leaf}_{i}.png");
-            if let Some(img) = image::RgbaImage::from_raw(r.crop_size, r.crop_size, r.crop.clone()) {
-                let _ = img.save(crops_dir.join(&crop_file));
+            if self.export_crops {
+                pending_crops.push((i, crop_file.clone()));
             }
+            // Identity of the leaf within its photograph.
+            let image_stem = l.and_then(|l| l.src.file_stem())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let nth = ordinal.get(leaf).copied().unwrap_or(0);
+            // `{stem}_leaf{NN}` matches the cut-out PNG segment_one writes, so a
+            // CSV row can be joined straight to its image.
+            let leaf_file = format!("{image_stem}_leaf{nth:02}");
             let mut cols = vec![
-                leaf.to_string(), csv_escape(&src), i.to_string(), cid.to_string(), csv_escape(&fam),
+                leaf.to_string(),
+                csv_escape(&image_stem),
+                (nth + 1).to_string(), // 1-based: "the 2nd leaf in this photo"
+                csv_escape(&leaf_file),
+                csv_escape(&src), i.to_string(), cid.to_string(), csv_escape(&fam),
                 area.to_string(), format!("{:.3}", 100.0 * area as f32 / leaf_px as f32), recon_pct, lost_pct,
                 bx.to_string(), by.to_string(), bw.to_string(), bh.to_string(), crop_file,
             ];
@@ -4710,45 +7906,203 @@ impl PipelineTab {
                 ]),
                 None => cols.extend(std::iter::repeat(String::new()).take(14)),
             }
-            csv.push_str(&cols.join(","));
-            csv.push('\n');
+            if !self.export_wide {
+                csv.push_str(&cols.join(","));
+                csv.push('\n');
+            }
             n += 1;
         }
 
-        // per-leaf overlays (anomalies colour-coded by family). The CSV loop above
-        // inherits rejection through `region_visible`; this one iterates LEAVES,
-        // so it needs the check itself or a rejected leaf would still ship an
-        // image (an empty one, which reads as "analysed, nothing found").
-        for (li, leaf) in self.results.iter().enumerate() {
-            if self.rejected_leaves.contains(&li) { continue; }
-            let (w, h) = (leaf.w as usize, leaf.h as usize);
-            let mut px = leaf.rgba.clone();
-            for (ri, r) in self.regions.iter().enumerate() {
-                if r.leaf == li && self.region_visible(ri) {
-                    paint_region(&mut px, w, h, r, cluster_color(self.labels[ri]), 0.6);
-                }
-            }
-            let stem = leaf.src.file_stem().map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("leaf_{li}"));
-            if let Some(img) = image::RgbaImage::from_raw(leaf.w, leaf.h, px) {
-                let _ = img.save(leaves_dir.join(format!("{stem}_{li}.png")));
-            }
-        }
+        // ── wide format: ONE row per leaf ──────────────────────────────────
+        // The long format answers "tell me about this region"; the wide one
+        // answers "tell me about this leaf", which is the shape most statistics
+        // want — a leaf is the sampling unit, and a long file has to be pivoted
+        // before it can be joined to anything measured per leaf.
+        if self.export_wide {
+            // A fixed family column order, so every row lines up and two runs
+            // over the same families produce comparable files.
+            let mut fam_ids: Vec<i32> =
+                self.clusters.iter().map(|c| c.id).filter(|&id| id >= 0).collect();
+            fam_ids.sort_unstable();
+            let fam_names: Vec<String> = fam_ids.iter()
+                .map(|&id| self.cluster_names.get(&id).cloned()
+                    .unwrap_or_else(|| format!("Cluster {id}")))
+                .collect();
 
-        match std::fs::write(dir.join("results.csv"), csv) {
-            // Name the excluded leaves explicitly. A silently smaller export is
-            // exactly the kind of thing that gets noticed months later, in the
-            // stats, with no way left to tell whether it was intentional.
-            Ok(_) => {
-                let skipped = self.rejected_leaves.len();
-                let note = if skipped > 0 {
-                    format!(" ({skipped} rejected leaves excluded)")
+            let mut head = String::from(
+                "leaf,image,leaf_in_image,leaf_file,leaf_src,leaf_area_px,n_anomalies,\
+                 anomaly_area_px,anomaly_pct_leaf,lost_tissue_pct,\
+                 ec_length,ec_width,ec_area,ec_shape_index,ec_circularity,ec_entropy,ec_outline,\
+                 mc_length,mc_width,mc_area,mc_shape_index,mc_circularity,mc_entropy,mc_outline",
+            );
+            for name in &fam_names {
+                let slug = csv_header_slug(name);
+                // count / total / mean / share, per family. The mean alone is not
+                // interpretable without the count behind it, and the total is what
+                // sums back to anomaly_area_px.
+                head.push_str(&format!(
+                    ",{slug}_count,{slug}_area_px,{slug}_avg_area_px,{slug}_pct_leaf"));
+            }
+            head.push('\n');
+
+            let mut wide = head;
+            let mut rows = 0usize;
+            for (leaf, l) in self.results.iter().enumerate() {
+                // Rejected leaves contribute no visible regions, so a row for one
+                // would be all zeros — indistinguishable from a genuinely clean
+                // leaf. Same set the overlay export writes.
+                if self.rejected_leaves.contains(&leaf) {
+                    continue;
+                }
+                let leaf_px = self.leaf_valid_px.get(leaf).copied().unwrap_or(1).max(1);
+                let image_stem = l.src.file_stem()
+                    .map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let nth = ordinal.get(leaf).copied().unwrap_or(0);
+                let total_n: usize = fam_ids.iter()
+                    .map(|&id| agg.get(&(leaf, id)).map_or(0, |a| a.0)).sum();
+                let total_a: u64 = fam_ids.iter()
+                    .map(|&id| agg.get(&(leaf, id)).map_or(0, |a| a.1)).sum();
+                let lost_pct = if l.recon_whole > 0 {
+                    format!("{:.3}", 100.0 * l.recon_area as f32 / l.recon_whole as f32)
                 } else {
                     String::new()
                 };
-                toasts.success(format!("Exported {n} anomalies + images → export/{note}"))
+                let mut cols = vec![
+                    leaf.to_string(),
+                    csv_escape(&image_stem),
+                    (nth + 1).to_string(),
+                    csv_escape(&format!("{image_stem}_leaf{nth:02}")),
+                    csv_escape(&l.src.display().to_string()),
+                    leaf_px.to_string(),
+                    total_n.to_string(),
+                    total_a.to_string(),
+                    format!("{:.3}", 100.0 * total_a as f32 / leaf_px as f32),
+                    lost_pct,
+                ];
+                match l.morph.as_ref() {
+                    Some(m) => cols.extend([
+                        format!("{:.2}", m.ec_length), format!("{:.2}", m.ec_width), m.ec_area.to_string(),
+                        format!("{:.4}", m.ec_shape_index), format!("{:.4}", m.ec_circularity),
+                        format!("{:.5}", m.ec_approximate_entropy), m.ec_outline_count.to_string(),
+                        format!("{:.2}", m.mc_length), format!("{:.2}", m.mc_width), m.mc_area.to_string(),
+                        format!("{:.4}", m.mc_shape_index), format!("{:.4}", m.mc_circularity),
+                        format!("{:.5}", m.mc_spectral_entropy), m.mc_outline_count.to_string(),
+                    ]),
+                    None => cols.extend(std::iter::repeat(String::new()).take(14)),
+                }
+                for &id in &fam_ids {
+                    let (c, a) = agg.get(&(leaf, id)).copied().unwrap_or((0, 0));
+                    cols.push(c.to_string());
+                    cols.push(a.to_string());
+                    // Mean of ZERO regions is undefined, not 0 — an empty cell
+                    // keeps it out of a downstream mean instead of dragging it
+                    // toward zero.
+                    cols.push(if c > 0 { format!("{:.1}", a as f64 / c as f64) } else { String::new() });
+                    cols.push(format!("{:.3}", 100.0 * a as f32 / leaf_px as f32));
+                }
+                wide.push_str(&cols.join(","));
+                wide.push('\n');
+                rows += 1;
             }
-            Err(e) => toasts.error(format!("write results.csv: {e}")),
+            csv = wide;
+            n = rows;
+        }
+
+        // The CSV goes down NOW, in full. It is the actual result; the images are
+        // an aid. So a cancelled or interrupted export still leaves a complete,
+        // valid results.csv rather than a truncated one.
+        if let Err(e) = std::fs::write(dir.join("results.csv"), csv) {
+            toasts.error(format!("write results.csv: {e}"));
+            return;
+        }
+
+        // Images are queued and written a chunk per frame — see `ExportJob`.
+        let leaves: Vec<usize> = if self.export_overlays {
+            (0..self.results.len()).filter(|li| !self.rejected_leaves.contains(li)).collect()
+        } else {
+            Vec::new()
+        };
+        let total = pending_crops.len() + leaves.len();
+        if total == 0 {
+            toasts.success(format!("Exported {n} anomalies -> export/results.csv"));
+            return;
+        }
+        self.export_job = Some(ExportJob {
+            crops_dir, leaves_dir,
+            crops: pending_crops,
+            leaves,
+            crop_cur: 0,
+            leaf_cur: 0,
+            written: 0,
+            failed: 0,
+            total,
+        });
+        toasts.info(format!("results.csv written · {total} images queued"));
+    }
+
+    /// Write one bounded slice of the queued export. Called once per frame.
+    ///
+    /// Chunk sizes are deliberately lopsided: a crop is a small thumbnail, an
+    /// overlay is a full-resolution composite plus PNG encode. Two overlays per
+    /// frame keeps a 60 Hz UI comfortably interactive and still clears 10,000
+    /// leaves in a minute or so.
+    fn step_export(&mut self, toasts: &mut ToastManager) {
+        const CROPS_PER_FRAME:  usize = 24;
+        const LEAVES_PER_FRAME: usize = 2;
+        let Some(job) = self.export_job.take() else { return };
+        let mut job = job;
+
+        let end = (job.crop_cur + CROPS_PER_FRAME).min(job.crops.len());
+        for k in job.crop_cur..end {
+            let (ri, ref name) = job.crops[k];
+            if let Some(r) = self.regions.get(ri) {
+                if let Some(img) = image::RgbaImage::from_raw(r.crop_size, r.crop_size, r.crop.clone()) {
+                    match img.save(job.crops_dir.join(name)) {
+                        Ok(()) => job.written += 1,
+                        Err(_) => job.failed += 1,
+                    }
+                }
+            }
+        }
+        job.crop_cur = end;
+
+        if job.crop_cur >= job.crops.len() {
+            let end = (job.leaf_cur + LEAVES_PER_FRAME).min(job.leaves.len());
+            for k in job.leaf_cur..end {
+                let li = job.leaves[k];
+                let Some(leaf) = self.results.get(li) else { continue };
+                let (w, h) = (leaf.w as usize, leaf.h as usize);
+                let mut px = leaf.rgba.clone();
+                for (ri, r) in self.regions.iter().enumerate() {
+                    if r.leaf == li && self.region_visible(ri) {
+                        paint_region(&mut px, w, h, r, cluster_color(self.labels[ri]), 0.6);
+                    }
+                }
+                let stem = leaf.src.file_stem().map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("leaf_{li}"));
+                if let Some(img) = image::RgbaImage::from_raw(leaf.w, leaf.h, px) {
+                    match img.save(job.leaves_dir.join(format!("{stem}_{li}.png"))) {
+                        Ok(()) => job.written += 1,
+                        Err(_) => job.failed += 1,
+                    }
+                }
+            }
+            job.leaf_cur = end;
+        }
+
+        if job.crop_cur >= job.crops.len() && job.leaf_cur >= job.leaves.len() {
+            // Report failures rather than swallowing them: the old code discarded
+            // every image write result and then said "Exported … + images".
+            if job.failed > 0 {
+                toasts.warning(format!(
+                    "Export finished — {} images written, {} failed (disk full or read-only?)",
+                    job.written, job.failed,
+                ));
+            } else {
+                toasts.success(format!("Export finished — {} images written", job.written));
+            }
+        } else {
+            self.export_job = Some(job);
         }
     }
 
@@ -5391,7 +8745,15 @@ impl PipelineTab {
             }
             ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(1.5, Color32::from_rgb(255, 90, 90))));
         }
-        if self.lasso_points.len() >= 2 && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        // Focus guard: without it, pressing Enter to commit a typed cluster name
+        // also committed a Scissor cut, because this site checked the raw key with
+        // no regard for what had keyboard focus. `Enter` is additionally the
+        // confirm-selection binding, so one press could fire both.
+        let typing = ui.memory(|m| m.focused().is_some());
+        if !typing
+            && self.lasso_points.len() >= 2
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        {
             let poly: Vec<(f32, f32)> = self.lasso_points.iter().map(|q| to_leaf(*q)).collect();
             let (sx, sy) = poly[0];
             let (ex, ey) = poly[poly.len() - 1];
@@ -5843,6 +9205,15 @@ impl PipelineTab {
                 }
                 toasts.success(format!("Restored {} region(s)", ids.len()));
             }
+            UndoEntry::Confirm(ids) => {
+                // Same retraction the Remove arm uses: the stable
+                // `region_{i}.png` filename makes this a clean delete of the row
+                // and its crop, with no orphan left behind.
+                for &i in &ids {
+                    self.retract_persisted(i);
+                }
+                toasts.success(format!("Un-confirmed {} region(s)", ids.len()));
+            }
             UndoEntry::Cut { originals, created } => {
                 // Cut pieces were never independently rejected/persisted as
                 // their own reject event, so undoing is a pure visibility
@@ -5930,6 +9301,26 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
+/// Family name -> a safe CSV column-name fragment.
+///
+/// Family names are user-editable free text, and the wide format builds column
+/// NAMES out of them ("Sucker_avg_area_px"). Quoting would survive a comma but
+/// leaves a header that R and pandas both mangle on import, so the characters
+/// are removed instead: anything outside `[A-Za-z0-9]` becomes `_`, runs
+/// collapse, and a name that reduces to nothing falls back to `family`.
+fn csv_header_slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() { "family".to_string() } else { trimmed.to_string() }
+}
+
 fn spawn_dialog(which: Pick) -> mpsc::Receiver<Option<PathBuf>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -5943,7 +9334,10 @@ fn spawn_dialog(which: Pick) -> mpsc::Receiver<Option<PathBuf>> {
                 .add_filter("checkpoint", &["mpk"])
                 .pick_file()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf())),
-            Pick::Yolo | Pick::Dino => rfd::FileDialog::new().add_filter("ONNX", &["onnx"]).pick_file(),
+            Pick::Yolo | Pick::Dino => rfd::FileDialog::new()
+                .add_filter("model weights", &["safetensors", "onnx"])
+                .add_filter("all files", &["*"])
+                .pick_file(),
             Pick::Bank => rfd::FileDialog::new().add_filter("bank", &["bin"]).pick_file(),
             Pick::Meta | Pick::Head => rfd::FileDialog::new().add_filter("json", &["json"]).pick_file(),
         };

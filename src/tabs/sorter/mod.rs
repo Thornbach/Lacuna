@@ -123,7 +123,7 @@ impl CategoryEditor {
                         cat.hotkey = if key_str.is_empty() { None } else { Some(key_str) };
 
                         // Output subfolder override
-                        ui.label("→");
+                        ui.label("->");
                         let mut sub = cat.output_subfolder.clone().unwrap_or_default();
                         ui.add(egui::TextEdit::singleline(&mut sub).desired_width(90.0).hint_text("(same as name)"));
                         cat.output_subfolder = if sub.is_empty() { None } else { Some(sub) };
@@ -876,7 +876,7 @@ impl SorterTab {
                         ];
                         egui::color_picker::color_edit_button_rgb(ui, &mut rgb);
                         new_color = [(rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8];
-                        ui.label(RichText::new("← saved automatically").small().color(Color32::GRAY));
+                        ui.label(RichText::new("saved automatically").small().color(Color32::GRAY));
                     });
 
                     ui.separator();
@@ -939,7 +939,7 @@ impl SorterTab {
                     .any(|i| i.status != ImageStatus::Unsorted);
                 if ui.add_enabled(
                     has_sorted,
-                    egui::Button::new(RichText::new("↺ Reset Sorting")
+                    egui::Button::new(RichText::new("Reset Sorting")
                         .color(Color32::from_rgb(220, 100, 80)))
                 ).clicked() {
                     self.confirm_reset = true;
@@ -1121,13 +1121,13 @@ impl SorterTab {
 
             ui.separator();
 
-            if ui.button("↩ Undo").clicked() { do_undo = true; }
+            if ui.button("Undo").clicked() { do_undo = true; }
 
             // Nav arrows
             ui.separator();
             if ui.button("◀").clicked() { self.navigate_prev(); }
             if ui.button("▶").clicked() { self.navigate_next(); }
-            if ui.button("↠").on_hover_text("Jump to first unsorted [Tab]").clicked() {
+            if ui.button(">>").on_hover_text("Jump to first unsorted [Tab]").clicked() {
                 self.jump_to_first_unsorted();
             }
 
@@ -1154,7 +1154,7 @@ impl SorterTab {
                             .small().color(color));
                     }
                 }
-                ui.label(RichText::new("  [→]=Skip  [←]=Prev  [↓]=Next  [F]=Flag  [Ctrl+Z]=Undo  [Tab]=First Unsorted")
+                ui.label(RichText::new("  [Right]=Skip  [Left]=Prev  [Down]=Next  [F]=Flag  [Ctrl+Z]=Undo  [Tab]=First Unsorted")
                     .small().color(Color32::GRAY));
             });
         }

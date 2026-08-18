@@ -1,0 +1,48 @@
+[package]
+name = "leaf_complex_gui"
+version = "1.0.0"
+edition = "2021"
+authors = ["Tobias Müller <tobimu@proton.me>"]
+description = "Interactive GUI for ShapeComplexity - Edge and Macro-shape Complexity Analysis"
+
+[dependencies]
+# Backend library (backend crate lives in parent directory; package name is `leaf_complex_rust`)
+leaf_complex_rust_lib = { path = "..", package = "leaf_complex_rust" }
+
+# GUI framework
+eframe = "0.29"
+egui = "0.29"
+egui_plot = "0.29"
+
+# File dialogs
+rfd = "0.15"
+
+# Image handling (same as backend)
+image = "0.24.7"
+
+# Logging
+env_logger = "0.11"
+log = "0.4"
+
+# System info
+num_cpus = "1.16"
+
+# Async runtime (for background tasks)
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# For faster compile times during development
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Platform-specific dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native windowing

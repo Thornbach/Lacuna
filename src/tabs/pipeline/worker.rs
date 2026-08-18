@@ -1595,6 +1595,96 @@ pub(crate) fn embed_resolution(dino_res: u32) -> u32 {
 /// patch centers back to leaf coordinates. Split out from the old
 /// `region_dino_embed` so the DINO forward itself can be batched across many
 /// regions (`DinoExtractor::features_batch`) instead of one call per region.
+// ── on-demand appearance ranking ────────────────────────────────────────────
+//
+// Measured on this project's GPU: one region embedding costs ~44 ms at res 512
+// (22/second, compute-bound). Detection itself is ~24 tile passes for a whole
+// leaf, so embedding every region of a busy leaf is roughly 250x the work of
+// detecting it — 4.4 minutes for 6,000 regions. That rules out doing it on every
+// run, and it is why this exists as an explicit action scoped to one family
+// (~341 regions ≈ 15 s) rather than as a pipeline stage.
+
+/// One region to embed. `mask` is bbox-local, as stored on `AnomalyRegion`.
+pub struct RankRegion {
+    pub idx:       usize,
+    pub centroid:  [f32; 2],
+    pub bbox_leaf: [u32; 4],
+    pub mask:      Vec<bool>,
+}
+
+/// Regions grouped by their leaf, so each leaf's pixels are cloned once rather
+/// than once per region.
+pub struct RankLeaf {
+    pub rgba:    Vec<u8>,
+    pub w:       u32,
+    pub h:       u32,
+    pub regions: Vec<RankRegion>,
+}
+
+pub enum RankMsg {
+    Progress { done: usize, total: usize },
+    /// `(region index, L2-normalized mask-aware embedding)`
+    Done(Vec<(usize, Vec<f32>)>),
+    Error(String),
+}
+
+pub fn spawn_rank(
+    dino_model: PathBuf,
+    dino_res:   u32,
+    leaves:     Vec<RankLeaf>,
+    tx:         mpsc::Sender<RankMsg>,
+    cancel:     Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        let total: usize = leaves.iter().map(|l| l.regions.len()).sum();
+        let mut dino = match DinoExtractor::load(&dino_model, dino_res) {
+            Ok(d) => d,
+            Err(e) => { let _ = tx.send(RankMsg::Error(format!("DINO: {e}"))); return; }
+        };
+        let res = embed_resolution(dino.res());
+        let mut out: Vec<(usize, Vec<f32>)> = Vec::with_capacity(total);
+        let mut done = 0usize;
+
+        for leaf in &leaves {
+            // Crops are built here rather than on the UI thread: it is real CPU
+            // work per region and the whole point is to keep the window alive.
+            let prepared: Vec<(usize, image::RgbImage, u32)> = leaf.regions.iter()
+                .map(|r| {
+                    let (img, win) = embed_crop(&leaf.rgba, leaf.w, leaf.h, r.centroid, r.bbox_leaf);
+                    (r.idx, img, win)
+                })
+                .collect();
+
+            for chunk in prepared.chunks(EMBED_BATCH) {
+                if cancel.load(Ordering::Relaxed) {
+                    // Partial results are still useful — the ranking simply
+                    // covers fewer regions — so send what we have.
+                    let _ = tx.send(RankMsg::Done(out));
+                    return;
+                }
+                let imgs: Vec<image::RgbImage> = chunk.iter().map(|(_, i, _)| i.clone()).collect();
+                match dino.features_batch_at(&imgs, res) {
+                    Ok(feats) => {
+                        for (k, f) in feats.iter().enumerate() {
+                            let (idx, _, win) = &chunk[k];
+                            let Some(r) = leaf.regions.iter().find(|r| r.idx == *idx) else { continue };
+                            let (mask_aware, _) = pool_region_embed(
+                                f, *win, r.centroid, r.bbox_leaf, &r.mask,
+                                leaf.w, leaf.h, false,
+                            );
+                            out.push((*idx, mask_aware));
+                        }
+                    }
+                    Err(e) => { let _ = tx.send(RankMsg::Error(format!("embed batch: {e}"))); return; }
+                }
+                done += chunk.len();
+                let _ = tx.send(RankMsg::Progress { done, total });
+            }
+        }
+        let _ = tx.send(RankMsg::Done(out));
+    });
+}
+
 fn embed_crop(
     leaf_rgba: &[u8], lw: u32, lh: u32,
     centroid: [f32; 2], bbox_leaf: [u32; 4],

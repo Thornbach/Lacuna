@@ -35,20 +35,16 @@ pub enum YoloModel {
 
 #[cfg(feature = "ort-backend")]
 fn use_ort() -> bool {
+    // Stays OFF by default, unlike DINO. The exported YOLO ONNX has a FIXED
+    // 640x640 input while the app segments at imgsz 1280, so the ort path would
+    // fail outright ("Got 1280, Expected 640"). BURN has no fixed input shape,
+    // which is the only reason 1280 works at all. Re-export dynamic or at 1280
+    // before turning this on.
     std::env::var("LACUNA_USE_ORT").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
 }
 
 fn resolve_yolo_weights(model_path: &Path) -> PathBuf {
-    if let Ok(p) = std::env::var("LACUNA_YOLO_WEIGHTS") {
-        return PathBuf::from(p);
-    }
-    if let Some(dir) = model_path.parent() {
-        let sib = dir.join("yolo_weights.safetensors");
-        if sib.exists() {
-            return sib;
-        }
-    }
-    PathBuf::from(r"E:\PhD_TobiMu\02_code\FoliarToolbox\port\yolo_weights.safetensors")
+    crate::paths::resolve_weights(model_path, "yolo_weights.safetensors", "LACUNA_YOLO_WEIGHTS")
 }
 
 /// Build the YOLO backend — BURN by default; ort only with the `ort-backend` feature

@@ -1,0 +1,83 @@
+# LeafComplexR Configuration File
+# EC = Edge Complexity (pink regions as opaque)
+# MC = Margin Complexity (pink regions as transparent)
+
+# Input/Output Paths
+input_path = "./input"  # Path to a single image or directory for batch processing
+output_base_dir = "./output"  # Base directory where EC, MC, and summary.csv will be created
+
+# Image Processing Parameters
+resize_dimensions = [512, 512]  # Optional [width, height] for batch processing
+
+opening_kernel_size = 9  # Diameter for morphological opening (EC region marking)
+marked_region_color_rgb = [255, 0, 255]  # Bright pink for marking opened regions
+
+# Adaptive Opening Parameters (for EC region marking)
+adaptive_opening_max_density = 75.0      # Density threshold: >=75% non-transparent triggers max opening
+adaptive_opening_max_percentage = 15.0   # Maximum opening percentage at high density
+adaptive_opening_min_percentage = 1.0    # Minimum opening percentage at low density
+
+# Analysis Parameters
+reference_point_choice = "COM"  # Either "EP" (EmergePoint) or "COM" (Center of Mass)
+# NOTE: COM will be calculated separately for EC (original image) and MC (post-opening image)
+
+# Parallel Processing
+use_parallel = true
+
+# Petiole Filtering Parameters (for EC analysis)
+enable_petiole_filter_ec = false  # Enable petiole filtering in EC pipeline
+enable_petiole_filter_ec_complexity = false  # Enable petiole filtering in EC complexity calculation
+petiole_remove_completely = true  # false = remove petiole completely, false = set to zero
+
+# Pink Path Threshold Filtering (for EC analysis)
+enable_pink_threshold_filter = true  # Enable threshold filtering for Geodesic_EC values
+pink_threshold_value = 3.0  # Values <= this threshold will be set to zero
+
+# Thornfiddle (MC) Analysis Parameters
+thornfiddle_smoothing_strength = 2.0  # Gaussian sigma for periodic smoothing (range: 0.5-5.0)
+
+# Approximate Entropy Parameters (for EC)
+approximate_entropy_m = 2  # Pattern length for ApEn calculation (typical: 1-3)
+approximate_entropy_r = 0.2  # Tolerance for ApEn calculation (typical: 0.1-0.3 * std_dev)
+
+# EC Scaling Parameters
+ec_scaling_factor = 3.0  # Scaling factor for edge complexity calculation
+
+# Dynamic Golden Lobe Detection Parameters (for MC)
+thornfiddle_max_opening_percentage = 30.0  # Max opening % for circular leaves (MC_ShapeIndex = 1.0)
+thornfiddle_min_opening_percentage = 5.0  # Min opening % for elongated leaves (MC_ShapeIndex >= 5.0)
+thornfiddle_pixel_threshold = 5  # Minimum golden pixels crossed to trigger harmonic chain
+thornfiddle_marked_color_rgb = [255, 215, 0]  # Golden yellow for lobe regions
+
+# Harmonic Enhancement Parameters
+harmonic_max_harmonics = 12  # N_max: Maximum harmonics for largest segments relative to circumference
+harmonic_strength_multiplier = 2.0  # Global harmonic strength (1.0 = normal, 2.0 = double)
+harmonic_min_chain_length = 15  # Minimum chain length (in contour points) for valid harmonic chain
+
+# Spectral Entropy Continuous Sigmoid Scaling Parameters (for MC)
+spectral_entropy_sigmoid_k = 20.0  # Steepness of sigmoid transition (higher = sharper)
+spectral_entropy_sigmoid_c = 0.04  # Center point of sigmoid transition (CV threshold)
+
+# NOTES:
+#   ADAPTIVE OPENING: EC region marking uses density-based kernel sizing
+#   * >=75% non-transparent pixels -> 15% of min(width,height) as kernel size
+#   * <75% non-transparent pixels -> Linear scaling down to 1% minimum
+#   * Formula: opening_percentage = min + (density/max_density) * (max - min)
+# 
+#   DYNAMIC THORNFIDDLE: Golden lobe detection uses MC shape-based kernel sizing
+#   * Dynamic opening % calculated from MC_ShapeIndex with linear interpolation
+#   * Dynamic kernel size = (dynamic_percentage / 100.0) * MC_SHORTER_dimension
+#   * Circular leaves (MC_ShapeIndex = 1.0): uses thornfiddle_max_opening_percentage
+#   * Elongated leaves (MC_ShapeIndex >= 5.0): uses thornfiddle_min_opening_percentage
+#   * Ensures kernel scales with leaf size and never exceeds narrow dimension
+#
+#   HARMONIC ENHANCEMENT: Principled approach based on geometric properties
+#   * Enhancement Richness: N_h = floor(N_max * (L_seg / C_leaf))
+#   * Enhancement Intensity: W_pos increases from 0 at segment start to 1 at deepest point
+#   * Harmonic Series: Enhancement = W_pos * Σ (1/k) * sin(2π * k * f_base * L_pos)
+#   * Base frequency normalized by leaf circumference for scale invariance
+#
+#   CONTINUOUS SPECTRAL ENTROPY: Prevents artifacts from low-amplitude noise
+#   * S(CV) = 1 / (1 + exp(-k * (CV - c))) where CV is coefficient of variation
+#   * Final entropy = H_spectral × S(CV)
+#   * k controls transition steepness, c controls transition center point

@@ -341,7 +341,7 @@ impl FieldReviewTab {
                 let active = *cur == tool;
                 let text = RichText::new(icon).size(15.0);
                 let btn = if active {
-                    egui::Button::new(text.color(Color32::BLACK)).fill(ui_kit::ACCENT)
+                    egui::Button::new(text.color(ui_kit::on_accent())).fill(ui_kit::ACCENT())
                 } else {
                     egui::Button::new(text)
                 };
@@ -444,7 +444,7 @@ impl FieldReviewTab {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Del: remove selected · Ctrl+Z: undo").small().color(Color32::GRAY));
                 ui.add_enabled_ui(!self.undo_stack.is_empty(), |ui| {
-                    if ui.small_button(format!("↩ Undo ({})", self.undo_stack.len()))
+                    if ui.small_button(format!("Undo ({})", self.undo_stack.len()))
                         .on_hover_text("Undo the most recent paint/erase/cut/delete (Ctrl+Z).")
                         .clicked()
                     {

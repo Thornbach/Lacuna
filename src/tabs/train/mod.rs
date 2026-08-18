@@ -208,8 +208,8 @@ impl TrainTab {
                 ui.add_enabled_ui(can_start, |ui| {
                     if ui.add_sized([220.0, 32.0],
                         egui::Button::new(
-                            RichText::new("Fit Detector").strong().color(Color32::from_gray(15)),
-                        ).fill(ui_kit::ACCENT)).clicked()
+                            RichText::new("Fit Detector").strong().color(ui_kit::on_accent()),
+                        ).fill(ui_kit::ACCENT())).clicked()
                     {
                         self.start();
                     }
@@ -521,7 +521,7 @@ impl TrainTab {
         }
         let (txt, col) = match (&own, &inherited) {
             (Some(p), _) => (p.display().to_string(), Color32::GRAY),
-            (None, Some(p)) => (format!("inherits: {}", p.display()), ui_kit::ACCENT),
+            (None, Some(p)) => (format!("inherits: {}", p.display()), ui_kit::ACCENT()),
             (None, None) => ("- not set -".to_string(), Color32::GRAY),
         };
         ui.label(RichText::new(txt).small().color(col));
@@ -644,7 +644,10 @@ fn spawn_dialog(which: Pick) -> mpsc::Receiver<Option<PathBuf>> {
     std::thread::spawn(move || {
         let res = match which {
             Pick::Healthy | Pick::Out | Pick::Curations | Pick::MineHealthyDir => rfd::FileDialog::new().pick_folder(),
-            Pick::Dino => rfd::FileDialog::new().add_filter("ONNX", &["onnx"]).pick_file(),
+            Pick::Dino => rfd::FileDialog::new()
+                .add_filter("model weights", &["safetensors", "onnx"])
+                .add_filter("all files", &["*"])
+                .pick_file(),
             Pick::Head => rfd::FileDialog::new().add_filter("json", &["json"]).pick_file(),
             Pick::BaseSet => rfd::FileDialog::new().add_filter("base set", &["bin"]).pick_file(),
         };

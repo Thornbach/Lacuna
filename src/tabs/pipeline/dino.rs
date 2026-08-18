@@ -38,7 +38,24 @@ enum Model {
 /// True if the optional ort path is compiled AND requested at runtime.
 #[cfg(feature = "ort-backend")]
 fn use_ort() -> bool {
-    std::env::var("LACUNA_USE_ORT").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+    // An explicit override always wins.
+    if let Ok(v) = std::env::var("LACUNA_USE_ORT") {
+        return v != "0" && !v.is_empty();
+    }
+    // Otherwise ORT is the right default ONLY when BURN would fall back to the
+    // pure-Rust ndarray CPU backend: measured at 512, ORT CPU is 921 ms vs
+    // ndarray's 4226 ms, a 4.6x win.
+    //
+    // It is the WRONG default when a GPU backend is compiled in. DINO is the
+    // pipeline's bottleneck, and ORT here is the CPU execution provider (the
+    // GPU EPs are the separate `ort-cuda` / `directml` features). Defaulting it
+    // ON unconditionally would quietly move the single heaviest model OFF the
+    // GPU that `wgpu-gpu`/`cuda` was enabled for — CUDA measured 212 ms at 512,
+    // so that is a ~4x regression in the exact build meant to be fast.
+    //
+    // Note BURN also has no fixed input shape, so LACUNA_USE_ORT=0 remains the
+    // way to run DINO at a resolution other than the ONNX's baked-in 512.
+    cfg!(not(any(feature = "cuda", feature = "wgpu-gpu")))
 }
 
 pub struct DinoExtractor {
@@ -86,16 +103,7 @@ impl DinoFeatures {
 
 /// Resolve the safetensors weights for the BURN path.
 fn resolve_burn_weights(model_path: &Path) -> PathBuf {
-    if let Ok(p) = std::env::var("LACUNA_DINO_WEIGHTS") {
-        return PathBuf::from(p);
-    }
-    if let Some(dir) = model_path.parent() {
-        let sib = dir.join("dino_weights.safetensors");
-        if sib.exists() {
-            return sib;
-        }
-    }
-    PathBuf::from(r"E:\PhD_TobiMu\02_code\FoliarToolbox\port\dino_weights.safetensors")
+    crate::paths::resolve_weights(model_path, "dino_weights.safetensors", "LACUNA_DINO_WEIGHTS")
 }
 
 impl DinoExtractor {

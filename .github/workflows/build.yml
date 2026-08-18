@@ -1,0 +1,76 @@
+# Build Lacuna on every platform we claim to support.
+#
+# Why this exists: the code had only ever been compiled on Windows. That says
+# nothing about Linux or macOS — a path separator, a missing system library or an
+# OS-gated dependency will not show up locally, and the first person to find out
+# would have been someone at a conference trying to run it. This turns "should
+# work everywhere" into "did build everywhere, on this commit".
+#
+# The default feature set is deliberately portable (wgpu + ort): wgpu reaches
+# NVIDIA, AMD, Intel and Apple silicon via Vulkan/Metal/DX12, where the old CUDA
+# default reached NVIDIA only.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel the other platforms when one fails — the whole point is to
+      # see every platform's result on a given commit.
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: windows-x64 }
+          - { os: ubuntu-latest,  name: linux-x64 }
+          - { os: macos-14,       name: macos-arm64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # egui/eframe need X11, Wayland, GL and GTK headers on Linux; without them
+      # the build fails at link time with errors that look like Rust problems but
+      # are not.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      # Type-check first: it fails in ~1 minute instead of ~15 and reports every
+      # error at once rather than stopping at the first codegen failure.
+      - name: cargo check
+        run: cargo check --locked --all-targets
+
+      - name: cargo build --release
+        run: cargo build --locked --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: lacuna-${{ matrix.name }}
+          # Models are NOT included — they are ~800 MB and belong on a release,
+          # not in a CI artifact.
+          path: |
+            target/release/lacuna
+            target/release/lacuna.exe
+          if-no-files-found: error
+          retention-days: 14
