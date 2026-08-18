@@ -61,6 +61,17 @@ fn use_ort() -> bool {
 pub struct DinoExtractor {
     model:   Model,
     res:     u32,
+    /// Set when the loaded ort graph has a FIXED input resolution, which every
+    /// export from `1Help/export_dinov3.py` does (`dynamic_axes=None`).
+    ///
+    /// When present it overrides the per-call `res` in `features_at`. That looks
+    /// heavy-handed, but the alternative is worse: `features_at` takes a res
+    /// argument and several callers pass their own (region-embed crops, the
+    /// bench, projection), so any one of them can hand a fixed graph a shape it
+    /// cannot accept and kill the run with a raw ort error. Honouring the graph
+    /// makes those calls merely slower or coarser instead of fatal. `None` for
+    /// BURN and for a genuinely dynamic graph, where the caller's res is used.
+    ort_fixed_res: Option<u32>,
     /// Wall-time (ms) of the most recent forward — for the pipeline timer.
     pub last_ms: f32,
     /// Wall-time (ms) of the most recent call's image resize + CHW-repack
@@ -106,13 +117,93 @@ fn resolve_burn_weights(model_path: &Path) -> PathBuf {
     crate::paths::resolve_weights(model_path, "dino_weights.safetensors", "LACUNA_DINO_WEIGHTS")
 }
 
+/// The input resolution an ONNX graph was exported at, if it is fixed.
+///
+/// `1Help/export_dinov3.py` exports with `dynamic_axes=None`, so the graph's
+/// `images` input is a hard `[1, 3, RES, RES]`. Feeding it anything else fails
+/// with "Got invalid dimensions for input: images", which is a *load-time*
+/// mismatch reported at run time — the least useful moment.
+///
+/// Returns `None` for a dynamic axis (`-1`) or a non-square input, where the
+/// caller's requested resolution is authoritative and nothing needs overriding.
+#[cfg(feature = "ort-backend")]
+fn ort_input_res(session: &ort::session::Session) -> Option<u32> {
+    use ort::value::ValueType;
+    let input = session.inputs.first()?;
+    let ValueType::Tensor { shape, .. } = &input.input_type else {
+        return None;
+    };
+    // NCHW.
+    let (h, w) = (*shape.get(2)?, *shape.get(3)?);
+    if h > 0 && h == w {
+        Some(h as u32)
+    } else {
+        None
+    }
+}
+
+/// Whether `model_path` is something ONNX Runtime can actually open.
+///
+/// Guards an upgrade path that would otherwise be a hard failure: the v0.4 cpu
+/// package shipped `dino_weights.safetensors` and no `.onnx` at all, so an
+/// existing `settings.json` can still point DINO at a safetensors file. On a CPU
+/// build `use_ort()` is now true, and handing that to ort fails to parse.
+///
+/// Returning false here falls through to BURN, which reads exactly that file.
+/// BURN on CPU is roughly 7x slower — but a slow run beats a dead one, and the
+/// log says plainly what happened and how to fix it.
+#[cfg(feature = "ort-backend")]
+fn ort_loadable(model_path: &Path) -> bool {
+    let is_onnx = model_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("onnx"));
+    if !is_onnx {
+        eprintln!(
+            "[dino] {} is not an .onnx - using BURN instead (slower). \
+             Point the DINO model at models/dino.onnx for the fast path.",
+            model_path.display()
+        );
+    }
+    is_onnx
+}
+
 impl DinoExtractor {
     pub fn load(model_path: &Path, res: u32) -> Result<Self, String> {
         // Optional ort fallback (only if compiled in AND LACUNA_USE_ORT=1).
         #[cfg(feature = "ort-backend")]
-        if use_ort() {
-            eprintln!("[dino] backend=ort (LACUNA_USE_ORT) {}", model_path.display());
-            return Ok(Self { model: Model::Ort(crate::tabs::build_session(model_path)?), res, last_ms: 0.0, last_prep_ms: 0.0 });
+        if use_ort() && ort_loadable(model_path) {
+            let session = crate::tabs::build_session(model_path)?;
+            // TRUST THE GRAPH, NOT THE CONFIG. The requested `res` comes from
+            // `worker::default_dino_res()` (256 on CPU), but the .onnx actually
+            // on disk decides what can run: a settings.json written by an older
+            // build still points at the 512 export, and the dev tree has both
+            // models/dino.onnx (512) and models/cpu256/dino.onnx (256).
+            // Mismatching them used to abort the whole pipeline with a raw ort
+            // shape error. Adapting instead means every combination runs — the
+            // 512 graph is simply slower, which is a far better failure mode
+            // than none at all a week before a conference.
+            let fixed = ort_input_res(&session);
+            let res = match fixed {
+                Some(graph_res) if graph_res != res => {
+                    eprintln!(
+                        "[dino] backend=ort {} — graph is fixed at {graph_res}px; \
+                         using that instead of the requested {res}px",
+                        model_path.display()
+                    );
+                    graph_res
+                }
+                _ => {
+                    eprintln!("[dino] backend=ort {} @{res}px", model_path.display());
+                    res
+                }
+            };
+            return Ok(Self {
+                model: Model::Ort(session),
+                res,
+                ort_fixed_res: fixed,
+                last_ms: 0.0,
+                last_prep_ms: 0.0,
+            });
         }
         // Default: pure-Rust BURN.
         let device = create_infer_device();
@@ -120,10 +211,25 @@ impl DinoExtractor {
         eprintln!("[dino] backend=BURN ({}) weights={}",
                   crate::tabs::recon_train::model::backend_name(), wpath.display());
         let net = crate::dino_burn::DinoV3Burn::<InferBackend>::load(&wpath.to_string_lossy(), &device)?;
-        Ok(Self { model: Model::Burn(Box::new(net), device), res, last_ms: 0.0, last_prep_ms: 0.0 })
+        Ok(Self {
+            model: Model::Burn(Box::new(net), device),
+            res,
+            // BURN reads H,W off the input tensor, so any res is valid.
+            ort_fixed_res: None,
+            last_ms: 0.0,
+            last_prep_ms: 0.0,
+        })
     }
 
     pub fn res(&self) -> u32 { self.res }
+
+    /// The resolution a call will ACTUALLY run at, given what the model allows.
+    fn effective_res(&self, requested: u32) -> u32 {
+        match self.ort_fixed_res {
+            Some(fixed) if fixed != requested => fixed,
+            _ => requested,
+        }
+    }
 
     /// Resize `img` to the extractor's own configured res×res, run the
     /// model, return per-patch features.
@@ -141,6 +247,9 @@ impl DinoExtractor {
     /// don't need the per-patch precision full-res per-tile detection does.
     /// `res` must be a multiple of the model's patch size (16).
     pub fn features_at(&mut self, img: &RgbImage, res: u32) -> Result<DinoFeatures, String> {
+        // A fixed-shape ort graph cannot honour an arbitrary res; see
+        // `ort_fixed_res`. Silently coarser beats a dead pipeline.
+        let res = self.effective_res(res);
         let resized = image::imageops::resize(img, res, res, FilterType::Triangle);
         let n = (res * res) as usize;
         // CHW, [0,1] — identical layout for both backends (ImageNet-normalize is
@@ -213,6 +322,9 @@ impl DinoExtractor {
         if imgs.is_empty() {
             return Ok(Vec::new());
         }
+        // Same graph constraint as the single-image path. Applied here too so
+        // the BURN branch below allocates for the resolution actually used.
+        let res = self.effective_res(res);
         #[cfg(feature = "ort-backend")]
         if matches!(self.model, Model::Ort(_)) {
             return imgs.iter().map(|img| self.features_at(img, res)).collect();

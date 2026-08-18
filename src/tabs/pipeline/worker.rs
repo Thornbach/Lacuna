@@ -364,6 +364,11 @@ fn run_pipeline(
     log(tx, crate::tabs::gpu_diagnostics());
     let mut yolo = seg::build_yolo(&cfg.yolo_model)?;
     let mut dino = DinoExtractor::load(&cfg.dino_model, cfg.dino_res)?;
+    // What the extractor SETTLED on, which is not necessarily what we asked for:
+    // a fixed-shape ort graph overrides the request (see DinoExtractor::load).
+    // Everything downstream — the warmup log, the head-alignment check — has to
+    // report this value, or it describes a run that did not happen.
+    let dino_res = dino.res();
     // DINO GPU check: two warmup forwards on a dummy tile. The WARM time makes it
     // unambiguous whether DINO is actually on the GPU (~20ms) or silently on CPU
     // (~600ms) — regardless of what "CUDA loadable" says.
@@ -388,7 +393,7 @@ fn run_pipeline(
         let verdict = "CPU build - this is the expected path".to_string();
         log(tx, format!(
             "DINO warmup {:.0}ms/forward at {}px - {}",
-            dino.last_ms, cfg.dino_res, verdict,
+            dino.last_ms, dino_res, verdict,
         ));
     }
     let device = create_infer_device();
@@ -410,10 +415,10 @@ fn run_pipeline(
                 h.classes.len(), h.dim, cfg.head_tau,
                 h.onnx_parity.map(|p| format!(" (parity {p:.3})")).unwrap_or_default(),
             ));
-            if h.infer_resolution != cfg.dino_res {
+            if h.infer_resolution != dino_res {
                 log(tx, format!(
-                    "⚠ head trained at {}px but DINO runs at {}px — features may not align",
-                    h.infer_resolution, cfg.dino_res,
+                    "! head trained at {}px but DINO runs at {}px - detections may be sparser",
+                    h.infer_resolution, dino_res,
                 ));
             }
             Some(h)
