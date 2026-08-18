@@ -137,6 +137,49 @@ pub(crate) const NOVEL_FAMILY: i32 = 9998;
 // detector operating point before something is worth surfacing as "novel".
 const NOVEL_CONFIDENCE_MULT: f32 = 1.5;
 
+/// DINO input resolution for detection tiles, chosen per backend at compile time.
+///
+/// GPU builds stay at 512. CPU builds drop to 256, which is the single biggest
+/// speed lever available and the reason a CPU-only laptop can run this at all.
+///
+/// Why it is worth the accuracy: cost scales with token count, and ViT-B/16 sees
+/// (res/16)^2 tokens — 1024 at 512, 256 at 256. Measured on a Ryzen 7 5800X with
+/// the ort CPU EP: 545 ms/tile at 512. Isolated scaling measurements put 256 at
+/// 5.89x cheaper. Combined with the ort backend (7.1x over burn ndarray, also
+/// measured) that is the difference between ~33 min/leaf and ~1 min/leaf on the
+/// kind of laptop this gets demoed on.
+///
+/// What it costs: each patch then describes 16 native px instead of 8, and the
+/// tile is no longer upsampled 2x on its way in. A June 2026 evaluation over the
+/// same 1829 GT tiles measured 512 vs 256 at tau=0.9 as pixel IoU 0.4406 ->
+/// 0.4063 and family purity 0.944 -> 0.942 — but per-family RECALL fell harder
+/// (Cluster 5: 40% -> 28%), which is why `default_head_tau` drops with it.
+///
+/// The ort path takes its shape from the ONNX graph, which has the resolution
+/// BAKED IN (`dynamic_axes=None` in 1Help/export_dinov3.py), so a CPU package
+/// must ship the matching export — scripts/package.ps1 maps dino_256.onnx onto
+/// models/dino.onnx for the cpu variant. BURN has no fixed input shape and
+/// follows this value directly.
+///
+/// `LACUNA_DINO_RES` overrides at runtime, for A/B testing a resolution without
+/// a 10-minute rebuild. On the ort path it will fail unless a matching graph is
+/// what got loaded, so it is a development knob, not a user-facing setting.
+pub fn default_dino_res() -> u32 {
+    if let Ok(v) = std::env::var("LACUNA_DINO_RES") {
+        if let Ok(r) = v.trim().parse::<u32>() {
+            // Must be a multiple of the ViT patch size or the grid maths breaks.
+            if r >= 64 && r % 16 == 0 {
+                return r;
+            }
+            eprintln!("[dino] ignoring LACUNA_DINO_RES={v} (need a multiple of 16, >= 64)");
+        }
+    }
+    #[cfg(any(feature = "cuda", feature = "wgpu-gpu"))]
+    { 512 }
+    #[cfg(not(any(feature = "cuda", feature = "wgpu-gpu")))]
+    { 256 }
+}
+
 pub struct PipeConfig {
     pub image_paths: Vec<PathBuf>,
     pub output_dir:  PathBuf,
@@ -328,9 +371,24 @@ fn run_pipeline(
         let dummy = image::RgbImage::new(256, 256);
         let _ = dino.features(&dummy);            // cold (CUDA/cuDNN autotune)
         let _ = dino.features(&dummy);            // warm
+        // Report the backend this binary was BUILT for rather than guessing it
+        // from wall time. The old heuristic ("under 150 ms must be a GPU") was
+        // sound when a CPU forward meant ~4000 ms, but a CPU build running ort
+        // at res 256 warms up in ~134 ms — so it confidently reported "GPU" on a
+        // machine with no GPU involved. It also told a CPU user their run was
+        // broken ("cuDNN not engaged"), which on the CPU variant is just untrue.
+        // ASCII only: the bundled fonts have no U+2713 and render it as tofu.
+        #[cfg(any(feature = "cuda", feature = "wgpu-gpu"))]
+        let verdict = if dino.last_ms < 150.0 {
+            "GPU engaged".to_string()
+        } else {
+            "SLOW - DINO is not on the GPU".to_string()
+        };
+        #[cfg(not(any(feature = "cuda", feature = "wgpu-gpu")))]
+        let verdict = "CPU build - this is the expected path".to_string();
         log(tx, format!(
-            "DINO warmup {:.0}ms/forward — {}", dino.last_ms,
-            if dino.last_ms < 150.0 { "GPU ✓" } else { "CPU (slow!) — cuDNN not engaged for DINO" },
+            "DINO warmup {:.0}ms/forward at {}px - {}",
+            dino.last_ms, cfg.dino_res, verdict,
         ));
     }
     let device = create_infer_device();

@@ -736,7 +736,7 @@ impl PipelineTab {
             use_patchcore:   false, // opt-in: only worth it once the bank reflects real healthy data
             unsupervised_families: false, // opt-in: requires use_patchcore's bank+meta too
             domain_projection: false, // opt-in: needs unsupervised_families + real curations
-            head_tau:        0.85,
+            head_tau:        crate::settings::default_head_tau(),
             head_grow:       0.7,
             tile_size:       256,
             margin_erode_px: 6,
@@ -6654,7 +6654,7 @@ impl PipelineTab {
                 min_hole_area: self.min_hole_area,
                 filter_margin_holes: self.filter_margin_holes,
                 hole_margin_px: self.hole_margin_px,
-                dino_res: 512,
+                dino_res: crate::tabs::pipeline::worker::default_dino_res(),
                 conf: self.conf,
                 recon_ckpt: self.eff_recon(),
                 head_path: head,
@@ -6844,7 +6844,7 @@ impl PipelineTab {
                 min_hole_area: self.min_hole_area,
                 filter_margin_holes: self.filter_margin_holes,
                 hole_margin_px: self.hole_margin_px,
-                dino_res: 512,
+                dino_res: crate::tabs::pipeline::worker::default_dino_res(),
                 conf: self.conf,
                 recon_ckpt: self.eff_recon(),
                 head_path: head,

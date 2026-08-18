@@ -661,7 +661,25 @@ fn default_true() -> bool { true }
 fn default_seg_conf() -> f32 { 0.25 }
 fn default_min_hole_area() -> u32 { 16 }
 fn default_hole_margin_px() -> u32 { 16 }
-fn default_head_tau() -> f32 { 0.85 }
+/// Few-shot head decision threshold. GPU builds keep 0.85; CPU builds relax to
+/// 0.60 because they run DINO at 256 (see `worker::default_dino_res`).
+///
+/// This pairing is not a guess. The June 2026 evaluation over 1829 GT tiles
+/// showed that dropping 512 -> 256 barely moves family PURITY (0.944 -> 0.942)
+/// but takes a real bite out of per-family RECALL at tau=0.9 — Cluster 5 fell
+/// 40% -> 28%, Cluster 4 80% -> 71%. At tau=0.6 the 256 configuration recovers
+/// to 75/90/91/65% against 512's 80/92/89/68%, trading pixel precision
+/// (0.4956 -> 0.3133) for finding the damage in the first place.
+///
+/// Missed damage is the worse failure here: a region that is never proposed
+/// cannot be reviewed or corrected, while a soft boundary on a region that IS
+/// proposed is exactly what the review step fixes.
+pub fn default_head_tau() -> f32 {
+    #[cfg(any(feature = "cuda", feature = "wgpu-gpu"))]
+    { 0.85 }
+    #[cfg(not(any(feature = "cuda", feature = "wgpu-gpu")))]
+    { 0.60 }
+}
 fn default_head_grow() -> f32 { 0.7 }
 fn default_cluster_eps() -> f32 { 1.5 }
 fn default_cluster_min_pts() -> usize { 5 }
@@ -700,7 +718,7 @@ impl Default for PipelineSettings {
             export_wide:        true,
             filter_leaf_only:   true,
             family_colors:      std::collections::HashMap::new(),
-            head_tau:           0.85,
+            head_tau:           default_head_tau(),
             head_grow:          0.7,
             cluster_eps:        1.5,
             cluster_min_pts:    5,

@@ -14,6 +14,14 @@ use crate::tabs::train::head::{spawn_retrain, RetrainCfg, RetrainMsg};
 
 const YOLO: &str = r"E:\PhD_TobiMu\02_code\02paper\leaf_segmentation\runs\segment\runs\segment\leaf_seg\weights\best.onnx";
 const DINO: &str = r"E:\PhD_TobiMu\02_code\02paper\anomaly\dinov3_vitb16_512.onnx";
+/// 256-resolution export, for builds whose `default_dino_res()` is 256.
+///
+/// The ort path cannot resize: `1Help/export_dinov3.py` exports with
+/// `dynamic_axes=None`, so the graph's input is fixed and feeding it any other
+/// resolution fails outright. Picking the model to match the resolution is what
+/// makes `--smoke` measure the configuration that actually ships instead of one
+/// that cannot load.
+const DINO_256: &str = r"E:\PhD_TobiMu\02_code\FoliarToolbox\models\cpu256\dino.onnx";
 const HEAD: &str = r"E:\PhD_TobiMu\02_code\FoliarToolbox\models\fewshot_head.json";
 const RECON: &str = r"E:\PhD_TobiMu\02_code\FoliarToolbox\models\recon";
 const OUT:  &str = r"E:\PhD_TobiMu\02_code\FoliarToolbox\smoke_out";
@@ -26,11 +34,14 @@ pub fn run(folder: &str) {
         return;
     }
     let out = PathBuf::from(OUT);
+    let dino_res = crate::tabs::pipeline::worker::default_dino_res();
+    let dino_model = if dino_res == 256 { DINO_256 } else { DINO };
+    println!("[smoke] dino_res={dino_res} model={dino_model}");
     let cfg = PipeConfig {
         image_paths: images,
         output_dir: out.clone(),
         yolo_model: PathBuf::from(YOLO),
-        dino_model: PathBuf::from(DINO),
+        dino_model: PathBuf::from(dino_model),
         bank_path: PathBuf::new(),  // unused on the few-shot path
         meta_path: PathBuf::new(),
         tile_size: 256,
@@ -41,15 +52,19 @@ pub fn run(folder: &str) {
         // behaviour, and this filter is opt-in.
         filter_margin_holes: false,
         hole_margin_px: 16,
-        dino_res: 512,
+        // Follow the build's own default so --smoke measures the configuration
+        // that actually ships, not a hardcoded 512 the CPU variant never uses.
+        dino_res,
         conf: 0.25,
         recon_ckpt: Some(PathBuf::from(RECON)),
         head_path: Some(PathBuf::from(HEAD)),
         use_patchcore: false,
         unsupervised_families: false,
         domain_projection: false,
-        head_tau: 0.85,
-        head_grow: 0.7,
+        // Also follow the build default: CPU relaxes tau to 0.60 to recover the
+        // per-family recall that running DINO at 256 costs.
+        head_tau: crate::settings::default_head_tau(),
+        head_grow: 0.7f32.min(crate::settings::default_head_tau()),
         seg_alpha_lo: 0.50,
         seg_chroma_min: 28,
         cluster_eps: 1.5,
@@ -131,7 +146,10 @@ pub fn run(folder: &str) {
     spawn_retrain(
         RetrainCfg {
             head_path: PathBuf::from(HEAD),
-            dino_model: PathBuf::from(DINO),
+            // Same model the pipeline just ran on. Using the 512 graph here
+            // while detection ran at 256 would featurise the curations in a
+            // different space than the head is about to be applied in.
+            dino_model: PathBuf::from(dino_model),
             curations_dir: cur,
             out_path: out.join("fewshot_head_retrained.json"),
             max_iters: 60,

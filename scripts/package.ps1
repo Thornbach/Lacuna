@@ -6,12 +6,15 @@
     dist/Lacuna-v<ver>.zip     the zip users download
 
   Users just extract and double-click lacuna.exe -- no Python, no Hugging Face,
-  no tokens, no .onnx. The BURN backends load the bundled .safetensors directly.
+  no tokens, no separate runtime to install. The GPU variants load the bundled
+  .safetensors through BURN; the cpu variant loads dino.onnx through ONNX
+  Runtime, which is STATICALLY linked into lacuna.exe (there is no
+  onnxruntime.dll to ship).
 
   Variants:
     gpu  (default)  cuda / NVIDIA GPU     -> Lacuna-v<ver>-gpu.zip   (fast)
     wgpu            Vulkan/DX12/Metal GPU -> Lacuna-v<ver>-wgpu.zip  (cross-platform, no CUDA)
-    cpu             ndarray, portable     -> Lacuna-v<ver>-cpu.zip   (no GPU needed, slow)
+    cpu             ndarray + ort CPU EP  -> Lacuna-v<ver>-cpu.zip   (no GPU needed)
 
   Usage:
     powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Variant gpu|wgpu|cpu] [-Version 0.1.0] [-SkipBuild]
@@ -40,22 +43,34 @@ if (-not $Version) {
 Write-Host "Packaging Lacuna v$Version ($Variant)" -ForegroundColor Cyan
 
 # 1. Build. gpu = default features (cuda, self-contained); wgpu = cross-platform GPU;
-#    cpu = ndarray (portable, no GPU).
+#    cpu = ndarray + ort CPU EP (portable, no GPU).
+#
+# The cpu variant builds into its OWN target dir. Alternating feature sets in a
+# shared target dir forces a full backend recompile each way (~10-11 min), so
+# packaging cpu used to silently evict a warm wgpu/cuda tree from target\.
+$targetDir = if ($Variant -eq "cpu") { Join-Path $root "target-cpu" } else { Join-Path $root "target" }
 if (-not $SkipBuild) {
-    Write-Host "Building release ($Variant)..." -ForegroundColor Cyan
+    Write-Host "Building release ($Variant) -> $targetDir" -ForegroundColor Cyan
     $manifest = Join-Path $root "Cargo.toml"
     if ($Variant -eq "cpu") {
-        & cargo build --release --no-default-features --manifest-path $manifest
+        # ort-backend is REQUIRED here, not optional. use_ort() is itself
+        # #[cfg(feature = "ort-backend")], so with the feature off the whole ort
+        # dispatch is compiled out and DINO silently runs on burn ndarray --
+        # measured 4114 ms/tile vs ort's 545 ms/tile at res 512, a 7.1x penalty
+        # on the one build that can least afford it. The ort runtime is
+        # statically linked (cargo:rustc-link-lib=static=onnxruntime), so this
+        # adds no DLL and no external dependency.
+        & cargo build --release --no-default-features --features ort-backend --target-dir $targetDir --manifest-path $manifest
     }
     elseif ($Variant -eq "wgpu") {
-        & cargo build --release --no-default-features --features wgpu-gpu --manifest-path $manifest
+        & cargo build --release --no-default-features --features wgpu-gpu --target-dir $targetDir --manifest-path $manifest
     }
     else {
-        & cargo build --release --manifest-path $manifest
+        & cargo build --release --target-dir $targetDir --manifest-path $manifest
     }
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
-$exe = Join-Path $root "target\release\lacuna.exe"
+$exe = Join-Path $targetDir "release\lacuna.exe"
 if (-not (Test-Path $exe)) { throw "exe not found: $exe (build first, or drop -SkipBuild)" }
 
 # 2. Staging tree.
@@ -67,15 +82,39 @@ New-Item -ItemType Directory -Force -Path `
 # 3. Executable.
 Copy-Item $exe $stage
 
-# 4. Runtime weights (BURN needs only these -- the big .onnx are NOT included).
+# 4. Runtime weights.
+#
+# DINO ships in whichever format the variant's backend actually loads:
+#   gpu/wgpu -> dino_weights.safetensors (BURN runs DINO on the GPU)
+#   cpu      -> dino.onnx + dino.onnx.data (use_ort() is true on a CPU build)
+# This is a SWAP, not an addition: 326.8 MB of safetensors out, 1.4 + 326.8 MB
+# of onnx in, so the zip grows by ~1 MB. app.rs's default-model discovery already
+# prefers dino.onnx and falls back to the safetensors, so nothing else changes.
+#
+# YOLO stays on safetensors for every variant: its use_ort() defaults to false
+# (the exported ONNX has a fixed 640x640 input while the Segmentation tab and
+# Field Review run at imgsz 1280), so the BURN weights are what actually loads.
 $models = Join-Path $root "models"
 $need = @(
-    @{ src = "dino_weights.safetensors"; dst = "models\dino_weights.safetensors" },
     @{ src = "yolo_weights.safetensors"; dst = "models\yolo_weights.safetensors" },
     @{ src = "fewshot_head.json";        dst = "models\fewshot_head.json" },
     @{ src = "recon\gen.mpk";            dst = "models\recon\gen.mpk" },
     @{ src = "detector_meta.json";       dst = "models\detector_meta.json" }
 )
+if ($Variant -eq "cpu") {
+    # models\cpu256\ holds the 256-resolution export (1Help/export_dinov3.py
+    # --res 256), matching worker::default_dino_res() on a CPU build. It lives in
+    # its own folder rather than as dino_256.onnx because ONNX external data is
+    # referenced BY FILENAME from inside the graph: this .onnx says
+    # "dino.onnx.data", so the pair has to keep those exact names or ort fails to
+    # load the weights. Same names, different folder = no collision with the
+    # 512 export in models\.
+    $need += @{ src = "cpu256\dino.onnx";      dst = "models\dino.onnx" }
+    $need += @{ src = "cpu256\dino.onnx.data"; dst = "models\dino.onnx.data" }
+}
+else {
+    $need += @{ src = "dino_weights.safetensors"; dst = "models\dino_weights.safetensors" }
+}
 if (-not $NoBank) {
     $need += @{ src = "coreset_bank.bin"; dst = "models\coreset_bank.bin" }
 }
@@ -86,6 +125,29 @@ foreach ($f in $need) {
 }
 if ($NoBank) {
     Write-Host "Skipped coreset_bank.bin (-NoBank): few-shot head only, no PatchCore." -ForegroundColor Yellow
+}
+
+# 4a. DirectML.dll -- the one native library that is NOT statically linked.
+#
+# ort-sys emits `cargo:rustc-link-lib=DirectML` (dynamic) in EVERY build variant,
+# alongside `static=onnxruntime`. On Windows 10 1903+ DirectML.dll is an inbox
+# component in System32 so the loader finds it and nobody notices. On anything
+# older -- Win10 LTSC 2019 (1809) and earlier, which is exactly what an old
+# conference laptop may be running -- the import fails, and because release
+# builds are `windows_subsystem = "windows"` (see main.rs) the process dies
+# SILENTLY, with no console and no error dialog. It reads as "the software does
+# not work".
+#
+# 17 MB against a ~750 MB zip is cheap insurance. The loader prefers the
+# application directory over System32 for non-KnownDLLs, so the bundled copy
+# wins where one is needed and is harmless where the system already has one.
+$dml = Join-Path $targetDir "release\DirectML.dll"
+if (Test-Path $dml) {
+    Copy-Item $dml $stage
+    Write-Host "Bundled DirectML.dll (pre-1903 Windows insurance)." -ForegroundColor Green
+}
+else {
+    Write-Warning "DirectML.dll not found at $dml -- package relies on the system copy (Win10 1903+ only)."
 }
 
 # 4b. SAM (optional). Goes in models\sam\ rather than models\ so it reads as one
