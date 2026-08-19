@@ -38,7 +38,15 @@ jobs:
           - { os: windows-latest, name: windows-x64,       features: "" }
           - { os: ubuntu-latest,  name: linux-x64,         features: "" }
           - { os: macos-14,       name: macos-arm64,       features: "" }
-          - { os: macos-13,       name: macos-x64,         features: "" }
+          # Intel Mac by CROSS-COMPILING from the arm64 runner, not by asking for
+          # an Intel one. `macos-13` is GitHub's deprecated Intel image: the first
+          # run left both x64 jobs `queued` with no runner assigned for 92 minutes
+          # before being cancelled, while their arm64 equivalents finished in 9-12
+          # minutes. Cross-compiling depends on nothing but the toolchain, so it
+          # cannot be starved of capacity. Both slices come from the same Xcode
+          # SDK, and ort keys its prebuilt off the target triple, so this fetches
+          # the x64-osx runtime exactly as a native Intel build would.
+          - { os: macos-14,       name: macos-x64,         features: "", target: x86_64-apple-darwin }
 
           # ── CPU-only build ─────────────────────────────────────────────────
           # This is what gets handed to people at a conference on their own
@@ -51,7 +59,7 @@ jobs:
           - { os: windows-latest, name: windows-x64-cpu,   features: "--no-default-features --features ort-backend" }
           - { os: ubuntu-latest,  name: linux-x64-cpu,     features: "--no-default-features --features ort-backend" }
           - { os: macos-14,       name: macos-arm64-cpu,   features: "--no-default-features --features ort-backend" }
-          - { os: macos-13,       name: macos-x64-cpu,     features: "--no-default-features --features ort-backend" }
+          - { os: macos-14,       name: macos-x64-cpu,     features: "--no-default-features --features ort-backend", target: x86_64-apple-darwin }
 
           # ── the fallback, proved separately ────────────────────────────────
           # Pure-Rust burn ndarray, no ONNX Runtime at all. ~7x slower, but it
@@ -61,6 +69,13 @@ jobs:
           # macOS x64 is covered by the arm64 job here: same source, same crates.
           - { os: ubuntu-latest,  name: linux-x64-burn,    features: "--no-default-features" }
           - { os: macos-14,       name: macos-arm64-burn,  features: "--no-default-features" }
+
+    # `--target` changes where cargo puts the binary, so both the flag and the
+    # output directory are derived from one place. Empty `matrix.target` means a
+    # native build and both collapse to their usual values.
+    env:
+      TARGET_FLAG: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+      BIN_DIR: ${{ matrix.target && format('target/{0}/release', matrix.target) || 'target/release' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +93,8 @@ jobs:
             libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev libgtk-3-dev
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -87,10 +104,12 @@ jobs:
       # error at once rather than stopping at the first codegen failure.
       # --locked so a lockfile that drifted is a CI failure, not a silent update.
       - name: cargo check
-        run: cargo check --locked --all-targets ${{ matrix.features }}
+        run: cargo check --locked --all-targets $TARGET_FLAG ${{ matrix.features }}
+        shell: bash
 
       - name: cargo build --release
-        run: cargo build --locked --release ${{ matrix.features }}
+        run: cargo build --locked --release $TARGET_FLAG ${{ matrix.features }}
+        shell: bash
 
       # Report what the binary dynamically links against, WITHOUT running it.
       #
@@ -108,9 +127,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN=target/release/lacuna
+          BIN="$BIN_DIR/lacuna"
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
           ls -l "$BIN"
+          file "$BIN" || true
           case "${{ runner.os }}" in
             Linux)   ldd    "$BIN" || true ;;
             macOS)   otool -L "$BIN" || true ;;
@@ -125,7 +145,7 @@ jobs:
           # not in a CI artifact. The app finds them next to the executable at
           # runtime (see src/paths.rs), so a user drops models/ beside it.
           path: |
-            target/release/lacuna
-            target/release/lacuna.exe
+            ${{ env.BIN_DIR }}/lacuna
+            ${{ env.BIN_DIR }}/lacuna.exe
           if-no-files-found: error
           retention-days: 14
