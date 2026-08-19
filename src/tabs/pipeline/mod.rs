@@ -244,16 +244,57 @@ enum Pick { Source, Output, Yolo, Dino, Bank, Meta, Recon, Head, MineHealthyDir,
 /// visibly indicated (see `show_toolbox`/the canvas options bar) so the same
 /// click/right-click gesture never silently means two different things.
 #[derive(Clone, Copy, PartialEq)]
-enum CanvasTool { Select, MarkHealthy, Brush, Eraser, Knife, Scissor, Lasso, Wand, Eyedropper, Polygon }
+enum CanvasTool { Select, MarkHealthy, Brush, Eraser, Knife, Scissor, Lasso, Wand, Polygon }
 
 /// One entry per undoable structural edit — `Ctrl+Z`/the gallery's "Undo"
 /// button always pops the most recent one, regardless of which action
 /// produced it. `Cut` (Knife tool) never touches `removed`/`persisted`:
 /// the pieces it creates were never independently rejected, so undoing a
 /// cut is purely a visibility flip (`merged_away`), not a reject-reversal.
+/// One region's mutable geometry, captured so an edit to it can be reversed.
+///
+/// Indices are stable: removal in this app is a visibility flag (`removed` /
+/// `merged_away`), never an actual `Vec::remove`, so a stored index still means
+/// the same region after any number of edits.
+#[derive(Clone)]
+struct RegionGeom {
+    idx:  usize,
+    mask: Vec<bool>,
+    area: u32,
+    crop: Vec<u8>,
+}
+
 enum UndoEntry {
     Remove(Vec<usize>),
     Cut { originals: Vec<usize>, created: Vec<usize> },
+    /// Regions brought into existence by a brush / wand / polygon stroke.
+    ///
+    /// Mask edits used to push NOTHING onto this stack, so Ctrl+Z after
+    /// painting silently reached past the stroke to whatever structural edit
+    /// came before — reported repeatedly as undo "doing something in the
+    /// regions from 10 steps ago" that could not then be taken back.
+    ///
+    /// A stroke touching existing regions MERGES with them, which hides the
+    /// others and rewrites the survivor, so reversing it needs more than the
+    /// created id. `merged` and the geometry pair are recorded by diffing state
+    /// around the merge rather than by reaching into `merge_region_group` —
+    /// correct regardless of what that function does internally.
+    Paint {
+        created: Vec<usize>,
+        merged:  Vec<usize>,
+        before:  Vec<RegionGeom>,
+        after:   Vec<RegionGeom>,
+    },
+    /// An eraser stroke: the geometry of every region it changed, before and
+    /// after, plus any region it erased down to nothing.
+    ///
+    /// `after` exists so redo is exact rather than a re-run of the gesture,
+    /// which would depend on cursor position that no longer exists.
+    Erase {
+        before:  Vec<RegionGeom>,
+        after:   Vec<RegionGeom>,
+        emptied: Vec<usize>,
+    },
     /// Regions confirmed into the curation set. Only ids that were NOT already
     /// persisted are recorded — undoing a confirm must not delete a curation the
     /// user had written earlier by some other route.
@@ -498,8 +539,6 @@ pub struct PipelineTab {
     canvas_pan:  egui::Vec2,
     // lasso tool: live screen-space points while dragging (cleared on release)
     lasso_points: Vec<egui::Pos2>,
-    // eyedropper tool: last hovered region's readout, shown in the options bar
-    inspect_info: Option<String>,
     // brush tool: accumulated leaf-pixel coords while dragging (cleared on
     // release), converted to a bbox-local mask only once the stroke ends. A
     // HashSet (not Vec) specifically so it can be rendered live every frame
@@ -555,7 +594,11 @@ pub struct PipelineTab {
     scroll_to_leaf: bool,
     region_thumbs:    Vec<Option<egui::TextureHandle>>, // parallel to regions
     removed:          HashSet<usize>,       // region indices removed by the user
-    struct_undo:      Vec<UndoEntry>,       // undo stack: one entry per removal or knife-cut gesture
+    struct_undo:      Vec<UndoEntry>,       // undo stack: one entry per edit gesture
+    /// Entries popped off `struct_undo`, awaiting redo. Cleared by any NEW edit
+    /// (`push_undo`), which is the standard branch-invalidation rule: once you
+    /// edit after undoing, the path you undid is no longer reachable.
+    struct_redo:      Vec<UndoEntry>,
     persisted:        HashSet<usize>,       // region indices already written to curations/labels.jsonl this run
     // region indices absorbed into another region by merge_touching_regions.
     // `regions` is append-only — a merge never removes/renumbers entries (that
@@ -809,7 +852,6 @@ impl PipelineTab {
             canvas_zoom:  1.0,
             canvas_pan:   egui::Vec2::ZERO,
             lasso_points: Vec::new(),
-            inspect_info: None,
             brush_shape:  BrushShape::Circle,
             brush_size:   32,
             brush_stroke: HashSet::new(),
@@ -835,6 +877,7 @@ impl PipelineTab {
             region_thumbs:    Vec::new(),
             removed:          HashSet::new(),
             struct_undo:      Vec::new(),
+            struct_redo:      Vec::new(),
             persisted:        HashSet::new(),
             merged_away:      HashSet::new(),
             rejected_leaves:  HashSet::new(),
@@ -1398,7 +1441,7 @@ impl PipelineTab {
         for id in ["region.next", "region.prev", "region.flag",
                    "view.outline", "view.recon", "view.focus", "view.clear_focus", "view.fit", "view.panel",
                    "run.start", "run.cancel", "review.export", "review.confirm_family",
-                   "review.undo"] {
+                   "review.undo", "review.redo"] {
             let k = self.keymap.key(id);
             if !shortcuts::is_unbound(k) && plain && ctx.input(|i| i.key_pressed(k)) {
                 self.perform_action(id, toasts);
@@ -1554,7 +1597,7 @@ impl PipelineTab {
 
         // The tools as DATA, so the column can be laid out arithmetically.
         // (tool, icon, name, tooltip, keymap id)
-        let tools: [(CanvasTool, &str, &str, &str, &str); 10] = [
+        let tools: [(CanvasTool, &str, &str, &str, &str); 9] = [
             (CanvasTool::Select, icon::CURSOR, "Select",
              "Click to select · drag to box-select · ctrl+click to multi-select · right-click for actions.",
              "tool.select"),
@@ -1589,9 +1632,6 @@ impl PipelineTab {
               blob) — review the pending selection, then \"Fill\" to label + commit it, or \"Clear\" \
               to discard. A fast alternative to hand-painting with the Brush.",
              "tool.wand"),
-            (CanvasTool::Eyedropper, icon::EYEDROPPER, "Eyedropper",
-             "Hover a region to see its cluster, area, and review status — read-only, doesn't select anything.",
-             "tool.eyedropper"),
             (CanvasTool::Polygon, icon::POLYGON, "Polygon",
              "Click to place nodes, click the first node again to close the shape and fill it. \
               With a region selected, it extends that region's own cluster; with nothing \
@@ -1815,10 +1855,6 @@ impl PipelineTab {
                             "click to grow a mask by color similarity (shift-click adds another \
                              blob); review the pending selection on the canvas, then Fill or Clear"
                         ).small().color(Color32::GRAY));
-                    }
-                    CanvasTool::Eyedropper => {
-                        let txt = self.inspect_info.clone().unwrap_or_else(|| "hover a region…".to_string());
-                        ui.label(RichText::new(txt).small().color(ui_kit::ACCENT()));
                     }
                     CanvasTool::Polygon => {
                         ui.label(RichText::new(
@@ -3755,23 +3791,6 @@ impl PipelineTab {
                 egui::Image::new((tex.id(), img_rect.size())).paint_at(ui, img_rect);
             }
         }
-        CanvasTool::Eyedropper => {
-            // ── read-only inspect: hover updates a readout in the options
-            // bar, never touches selection/confirm/reject state ──
-            self.inspect_info = resp.hover_pos().and_then(|p| {
-                let lx = (p.x - img_rect.min.x) / s.max(1e-3);
-                let ly = (p.y - img_rect.min.y) / s.max(1e-3);
-                self.region_at(leaf_idx, lx, ly).map(|i| {
-                    let cid = self.labels[i];
-                    let family = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
-                    let area = self.region_area.get(i).copied().unwrap_or(0);
-                    let status = if self.removed.contains(&i) { "rejected" }
-                        else if self.persisted.contains(&i) { "confirmed" }
-                        else { "unreviewed" };
-                    format!("Region {i} · {family} · {area}px · {status}")
-                })
-            });
-        }
         CanvasTool::Polygon => {
             let to_leaf = |p: egui::Pos2| ((p.x - img_rect.min.x) / s.max(1e-3), (p.y - img_rect.min.y) / s.max(1e-3));
             // Clamp every placed node to the actual leaf bounds — a click
@@ -3940,7 +3959,6 @@ impl PipelineTab {
                 else if km.pressed(i, "tool.scissor") { Some(CanvasTool::Scissor) }
                 else if km.pressed(i, "tool.lasso") { Some(CanvasTool::Lasso) }
                 else if km.pressed(i, "tool.wand") { Some(CanvasTool::Wand) }
-                else if km.pressed(i, "tool.eyedropper") { Some(CanvasTool::Eyedropper) }
                 else if km.pressed(i, "tool.polygon") { Some(CanvasTool::Polygon) }
                 else { None }
             });
@@ -4053,6 +4071,13 @@ impl PipelineTab {
                 } else {
                     self.undo_last_edit(toasts);
                 }
+            }
+            // Redo, scoped identically to the Ctrl+Z above. Ctrl+Y rather than
+            // Ctrl+Shift+Z: Shift is already the additive modifier for canvas
+            // selection, and overloading it here would make redo depend on
+            // whether a drag happened to be in progress.
+            if !focused && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
+                self.redo_last_edit(toasts);
             }
             if do_confirm {
                 self.confirm_regions(&effective_sel, toasts);
@@ -5797,10 +5822,21 @@ impl PipelineTab {
             }
             ui.add_enabled_ui(!self.struct_undo.is_empty(), |ui| {
                 if ui.small_button(format!("Undo ({})", self.struct_undo.len()))
-                    .on_hover_text("Reverse the last reject, confirm or cut. Ctrl+Z.")
+                    .on_hover_text("Reverse the last edit, including a paint or eraser stroke. Ctrl+Z.")
                     .clicked()
                 {
                     self.undo_last_edit(toasts);
+                }
+            });
+            // Sits next to Undo, always visible and merely disabled when empty,
+            // so it is discoverable BEFORE you need it — the reviewer who wanted
+            // this had already undone one step too far by the time they looked.
+            ui.add_enabled_ui(!self.struct_redo.is_empty(), |ui| {
+                if ui.small_button(format!("Redo ({})", self.struct_redo.len()))
+                    .on_hover_text("Put back what Undo just reversed. Ctrl+Y.")
+                    .clicked()
+                {
+                    self.redo_last_edit(toasts);
                 }
             });
         });
@@ -5925,6 +5961,7 @@ impl PipelineTab {
                 && self.stage_view != StageView::Done,
             "review.confirm_family" => self.selected_cluster.is_some(),
             "review.undo" => !self.struct_undo.is_empty(),
+            "review.redo" => !self.struct_redo.is_empty(),
             "leaf.prev" | "leaf.next" | "leaf.next_unreviewed"
             | "leaf.reviewed" | "leaf.reject" => !self.results.is_empty(),
             "region.confirm" | "region.reject" | "region.reassign" =>
@@ -6040,6 +6077,7 @@ impl PipelineTab {
                 }
             }
             "review.undo"   => self.undo_last_edit(toasts),
+            "review.redo"   => self.redo_last_edit(toasts),
             "review.export" => self.export_results(toasts),
             "flow.finish" => self.stage_view = StageView::Done,
             "run.start" => {
@@ -6075,7 +6113,6 @@ impl PipelineTab {
                     "tool.scissor"      => Some(CanvasTool::Scissor),
                     "tool.lasso"        => Some(CanvasTool::Lasso),
                     "tool.wand"         => Some(CanvasTool::Wand),
-                    "tool.eyedropper"   => Some(CanvasTool::Eyedropper),
                     "tool.polygon"      => Some(CanvasTool::Polygon),
                     _ => None,
                 };
@@ -8619,6 +8656,12 @@ impl PipelineTab {
         self.coords.push([0.0, 0.0]);
         self.region_thumbs.push(None);
 
+        // Everything below is recorded so ONE stroke is ONE undo step. State is
+        // diffed around the merge rather than predicted from it.
+        let merged_before: HashSet<usize> = self.merged_away.clone();
+        let geom_before: Vec<RegionGeom> =
+            touched.iter().filter_map(|&i| self.snapshot_region(i)).collect();
+
         let idx = if touched.is_empty() {
             new_idx
         } else {
@@ -8627,6 +8670,20 @@ impl PipelineTab {
             self.merge_region_group(&group, toasts);
             *group.iter().min().unwrap()
         };
+
+        let merged: Vec<usize> = self
+            .merged_away
+            .difference(&merged_before)
+            .copied()
+            .collect();
+        let geom_after: Vec<RegionGeom> =
+            geom_before.iter().filter_map(|g| self.snapshot_region(g.idx)).collect();
+        self.push_undo(UndoEntry::Paint {
+            created: vec![new_idx],
+            merged,
+            before: geom_before,
+            after: geom_after,
+        });
 
         self.build_clusters(toasts);
         self.overlay_tex = None;
@@ -8681,12 +8738,20 @@ impl PipelineTab {
             return;
         }
         let mut emptied: Vec<usize> = Vec::new();
+        // Captured BEFORE any mutation so the stroke is reversible as one
+        // gesture. Only regions this stroke actually touches are recorded, so
+        // the cost is proportional to the edit, not to the leaf.
+        let mut before: Vec<RegionGeom> = Vec::new();
         for i in 0..self.regions.len() {
             if self.regions[i].leaf != leaf_idx || !self.region_visible(i) {
                 continue;
             }
             let [bx, by, bw, bh] = self.regions[i].bbox_leaf;
             let mut touched = false;
+            // Snapshot LAZILY, on the first pixel actually cleared. Snapshotting
+            // up front would clone the mask and crop of every visible region on
+            // the leaf, most of which the stroke never reaches.
+            let mut snap: Option<RegionGeom> = None;
             for &(x, y) in &pts {
                 if x < bx as i32 || y < by as i32 || x >= (bx + bw) as i32 || y >= (by + bh) as i32 {
                     continue;
@@ -8694,12 +8759,18 @@ impl PipelineTab {
                 let (mx, my) = ((x - bx as i32) as u32, (y - by as i32) as u32);
                 let mi = (my * bw + mx) as usize;
                 if self.regions[i].mask[mi] {
+                    if snap.is_none() {
+                        snap = self.snapshot_region(i);
+                    }
                     self.regions[i].mask[mi] = false;
                     touched = true;
                 }
             }
             if !touched {
                 continue;
+            }
+            if let Some(s) = snap {
+                before.push(s);
             }
             let new_area = self.regions[i].mask.iter().filter(|&&b| b).count() as u32;
             if new_area == 0 {
@@ -8737,8 +8808,16 @@ impl PipelineTab {
                 self.persist_region(i, &name, false, toasts);
             }
         }
+        // One gesture, one undo entry — including any region erased to nothing.
+        // `remove_regions_inner` is used deliberately so the removal does not
+        // push its own competing entry and make one stroke take two Ctrl+Z.
         if !emptied.is_empty() {
-            self.remove_regions(&emptied, toasts, false);
+            self.remove_regions_inner(&emptied, toasts, false);
+        }
+        if !before.is_empty() || !emptied.is_empty() {
+            let after: Vec<RegionGeom> =
+                before.iter().filter_map(|g| self.snapshot_region(g.idx)).collect();
+            self.push_undo(UndoEntry::Erase { before, after, emptied });
         }
         self.overlay_tex = None;
     }
@@ -8824,9 +8903,20 @@ impl PipelineTab {
                 if self.lasso_points.len() >= 3 {
                     let poly: Vec<(f32, f32)> = self.lasso_points.iter().map(|p| to_leaf(*p)).collect();
                     let (sx, sy) = poly[0];
-                    if let Some(i) = self.region_at(leaf_idx, sx, sy) {
-                        self.do_polycut(leaf_idx, i, &poly, toasts);
+                    // The lasso cuts the region it STARTS on. Starting anywhere
+                    // else used to do nothing at all, silently — reported as
+                    // "das Lasso Tool ging eben und jetzt nicht mehr", because a
+                    // tool that fails without saying so is indistinguishable
+                    // from a broken one. Especially easy to hit right after an
+                    // undo, when the region you started on may be hidden again.
+                    match self.region_at(leaf_idx, sx, sy) {
+                        Some(i) => self.do_polycut(leaf_idx, i, &poly, toasts),
+                        None => toasts.info(
+                            "Lasso cuts the region it starts on — begin the loop inside one.",
+                        ),
                     }
+                } else if self.lasso_points.len() >= 1 {
+                    toasts.info("Lasso needs a loop — drag around the part you want to cut off.");
                 }
                 self.lasso_points.clear();
             }
@@ -9298,6 +9388,18 @@ impl PipelineTab {
         if ids.is_empty() {
             return;
         }
+        self.remove_regions_inner(ids, toasts, write_reject);
+        self.push_undo(UndoEntry::Remove(ids.to_vec()));
+        self.overlay_tex = None;
+    }
+
+    /// The removal itself, WITHOUT touching the undo stack.
+    ///
+    /// Split out for the eraser: a stroke that erases a region down to nothing
+    /// is one gesture, and pushing a separate `Remove` entry for it would make
+    /// that single stroke take two Ctrl+Z to reverse. The caller folds the
+    /// emptied ids into its own entry instead.
+    fn remove_regions_inner(&mut self, ids: &[usize], toasts: &mut ToastManager, write_reject: bool) {
         for &i in ids {
             self.removed.insert(i);
             if write_reject {
@@ -9306,14 +9408,40 @@ impl PipelineTab {
                 self.retract_persisted(i);
             }
         }
-        self.push_undo(UndoEntry::Remove(ids.to_vec()));
-        self.overlay_tex = None;
+    }
+
+    /// Capture a region's reversible geometry.
+    fn snapshot_region(&self, idx: usize) -> Option<RegionGeom> {
+        let r = self.regions.get(idx)?;
+        Some(RegionGeom {
+            idx,
+            mask: r.mask.clone(),
+            area: self.region_area.get(idx).copied().unwrap_or(0),
+            crop: r.crop.clone(),
+        })
+    }
+
+    /// Put a captured geometry back, and invalidate the cached thumbnail so the
+    /// tile does not keep showing the state we just reversed.
+    fn restore_region(&mut self, g: &RegionGeom) {
+        if let Some(r) = self.regions.get_mut(g.idx) {
+            r.mask = g.mask.clone();
+            r.crop = g.crop.clone();
+        }
+        if let Some(a) = self.region_area.get_mut(g.idx) {
+            *a = g.area;
+        }
+        if let Some(t) = self.region_thumbs.get_mut(g.idx) {
+            *t = None;
+        }
     }
 
     /// Push a new undo entry, capping the stack the same way the old
     /// remove-only stack did.
     fn push_undo(&mut self, entry: UndoEntry) {
         self.struct_undo.push(entry);
+        // A fresh edit invalidates any redo branch.
+        self.struct_redo.clear();
         const MAX_UNDO: usize = 50;
         if self.struct_undo.len() > MAX_UNDO {
             self.struct_undo.remove(0);
@@ -9328,9 +9456,54 @@ impl PipelineTab {
             toasts.info("Nothing to undo.");
             return;
         };
+        self.apply_undo(&entry, toasts);
+        self.struct_redo.push(entry);
+        self.overlay_tex = None;
+    }
+
+    /// Re-apply the most recently undone edit.
+    ///
+    /// Added because undo alone was a trap: someone who undid one step too far
+    /// had no way back, and said so — "es wäre richtig gut, wenn es nicht nur
+    /// Undo gäbe, sondern auch einen Wiederherstellen Knopf".
+    fn redo_last_edit(&mut self, toasts: &mut ToastManager) {
+        let Some(entry) = self.struct_redo.pop() else {
+            toasts.info("Nothing to redo.");
+            return;
+        };
+        self.apply_redo(&entry, toasts);
+        self.struct_undo.push(entry);
+        self.overlay_tex = None;
+    }
+
+    fn apply_undo(&mut self, entry: &UndoEntry, toasts: &mut ToastManager) {
         match entry {
+            UndoEntry::Paint { created, merged, before, .. } => {
+                // Soft-hide rather than delete: indices are stable and redo
+                // needs the region to still be there.
+                for &i in created {
+                    self.removed.insert(i);
+                    self.retract_persisted(i);
+                }
+                for &i in merged {
+                    self.merged_away.remove(&i);
+                }
+                for g in before {
+                    self.restore_region(g);
+                }
+                toasts.success("Undid paint stroke");
+            }
+            UndoEntry::Erase { before, emptied, .. } => {
+                for g in before {
+                    self.restore_region(g);
+                }
+                for &i in emptied {
+                    self.removed.remove(&i);
+                }
+                toasts.success("Undid eraser stroke");
+            }
             UndoEntry::Remove(ids) => {
-                for &i in &ids {
+                for &i in ids {
                     self.removed.remove(&i);
                     // undo the disk write too — a restored region goes back to
                     // "unreviewed," not "rejected," so its persisted reject line
@@ -9344,7 +9517,7 @@ impl PipelineTab {
                 // Same retraction the Remove arm uses: the stable
                 // `region_{i}.png` filename makes this a clean delete of the row
                 // and its crop, with no orphan left behind.
-                for &i in &ids {
+                for &i in ids {
                     self.retract_persisted(i);
                 }
                 toasts.success(format!("Un-confirmed {} region(s)", ids.len()));
@@ -9353,13 +9526,76 @@ impl PipelineTab {
                 // Cut pieces were never independently rejected/persisted as
                 // their own reject event, so undoing is a pure visibility
                 // flip: hide the pieces, restore the pre-cut region(s).
-                for &i in &created {
+                for &i in created {
                     self.merged_away.insert(i);
                 }
-                for &i in &originals {
+                for &i in originals {
                     self.merged_away.remove(&i);
                 }
                 toasts.success("Undid knife cut");
+                self.build_clusters(toasts);
+            }
+        }
+        self.overlay_tex = None;
+    }
+
+    /// The exact inverse of `apply_undo`, entry for entry.
+    ///
+    /// Deliberately state-restoring rather than gesture-replaying: an eraser
+    /// redo puts back the recorded `after` geometry instead of re-running the
+    /// stroke, which would depend on a cursor path that no longer exists.
+    fn apply_redo(&mut self, entry: &UndoEntry, toasts: &mut ToastManager) {
+        match entry {
+            UndoEntry::Paint { created, merged, after, .. } => {
+                for &i in created {
+                    self.removed.remove(&i);
+                }
+                for &i in merged {
+                    self.merged_away.insert(i);
+                }
+                for g in after {
+                    self.restore_region(g);
+                }
+                toasts.success("Redid paint stroke");
+            }
+            UndoEntry::Erase { after, emptied, .. } => {
+                for g in after {
+                    self.restore_region(g);
+                }
+                for &i in emptied {
+                    self.removed.insert(i);
+                }
+                toasts.success("Redid eraser stroke");
+            }
+            UndoEntry::Remove(ids) => {
+                for &i in ids {
+                    self.removed.insert(i);
+                }
+                toasts.success(format!("Removed {} region(s) again", ids.len()));
+            }
+            UndoEntry::Confirm(ids) => {
+                // Re-persist under the region's CURRENT family name — the label
+                // is read now rather than stored, so a redo after a reassign
+                // writes the family the region actually has.
+                for &i in ids {
+                    let cid = self.labels.get(i).copied().unwrap_or(-1);
+                    let name = self
+                        .cluster_names
+                        .get(&cid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Cluster {cid}"));
+                    self.persist_region(i, &name, false, toasts);
+                }
+                toasts.success(format!("Re-confirmed {} region(s)", ids.len()));
+            }
+            UndoEntry::Cut { originals, created } => {
+                for &i in created {
+                    self.merged_away.remove(&i);
+                }
+                for &i in originals {
+                    self.merged_away.insert(i);
+                }
+                toasts.success("Redid knife cut");
                 self.build_clusters(toasts);
             }
         }
