@@ -537,6 +537,10 @@ pub struct PipelineTab {
     // resulting img_rect/s, so nothing else needs to change.
     canvas_zoom: f32,
     canvas_pan:  egui::Vec2,
+    /// Region the canvas should scroll into view on the next draw, set when the
+    /// selection changes from the region grid. Honoured (and cleared) inside the
+    /// canvas draw, which is the only place the leaf->screen mapping exists.
+    center_on_region: Option<usize>,
     // lasso tool: live screen-space points while dragging (cleared on release)
     lasso_points: Vec<egui::Pos2>,
     // brush tool: accumulated leaf-pixel coords while dragging (cleared on
@@ -851,6 +855,7 @@ impl PipelineTab {
 
             canvas_zoom:  1.0,
             canvas_pan:   egui::Vec2::ZERO,
+            center_on_region: None,
             lasso_points: Vec::new(),
             brush_shape:  BrushShape::Circle,
             brush_size:   32,
@@ -2505,8 +2510,38 @@ impl PipelineTab {
                     // Opens the panel BELOW, in place. It used to bounce you back
                     // to the review screen with a toast describing where to look,
                     // which is an instruction where a control belongs.
-                    if ui.button("Teach the model").clicked() {
+                    // Teaches, rather than revealing a panel that teaches.
+                    //
+                    // It used to only force the "Improve the model" section open
+                    // below, which reads as doing nothing — the reporter was
+                    // "confused why it doesn't teach immediately" and
+                    // "overwhelmed by the choices". Every knob in that section
+                    // has a working default, so the button now starts the
+                    // retrain and opens the section so progress is visible.
+                    // Nobody who just wants to train has to make a decision.
+                    let can_teach = self.output_folder.is_some()
+                        && self.eff_head().is_some()
+                        && self.eff_dino().is_some()
+                        && !self.retraining
+                        && !self.running
+                        && !self.mining;
+                    let btn = ui.add_enabled(
+                        can_teach,
+                        egui::Button::new(if self.retraining {
+                            "Teaching…"
+                        } else {
+                            "Teach the model"
+                        }),
+                    );
+                    if btn
+                        .on_hover_text(
+                            "Retrain the head on everything you have curated, using the \
+                             defaults below. Opens the section so you can watch it run.",
+                        )
+                        .clicked()
+                    {
                         self.improve_open_req = true;
+                        self.start_retrain();
                     }
                 });
         }
@@ -3190,6 +3225,36 @@ impl PipelineTab {
         }
     }
 
+    /// The colour the brush should preview and paint in: the target family's
+    /// own colour, resolved through `cluster_color` so user overrides apply.
+    ///
+    /// The preview used to be a hardcoded orange for every family, so a custom
+    /// category looked one colour under the brush and another in the legend —
+    /// "eigene Kategorie Blattschaden hat bei Pinsel andere Farbe als bei
+    /// Familien". Falls back to that orange only when the typed name is a family
+    /// that does not exist yet, where there is genuinely no colour to show.
+    ///
+    /// Read-only on purpose: `resolve_cluster_id` would MINT an id for an unknown
+    /// name, and a hover preview must not create a family as a side effect.
+    fn brush_preview_color(&self) -> Color32 {
+        let name = self.hardneg_label.trim();
+        if name.is_empty() {
+            return Color32::from_rgb(255, 150, 60);
+        }
+        match self
+            .cluster_names
+            .iter()
+            .find(|(_, n)| n.eq_ignore_ascii_case(name))
+            .map(|(&id, _)| id)
+        {
+            Some(id) => {
+                let c = cluster_color(id);
+                Color32::from_rgb(c[0], c[1], c[2])
+            }
+            None => Color32::from_rgb(255, 150, 60),
+        }
+    }
+
     /// Which family the brush should paint into unless told otherwise.
     ///
     /// Prefers the family of the REGION currently selected, and only then the
@@ -3385,6 +3450,27 @@ impl PipelineTab {
         // through img_rect/s below, so generalizing THIS ONE computation is
         // all that's needed; no other call site changes.
         let fit_rect = egui::Rect::from_center_size(area.center(), disp);
+        // Honour a pending "bring the selected region into view" request now that
+        // fit_rect is known — it is the only place the mapping from leaf pixels
+        // to screen exists.
+        //
+        // Only while zoomed in: at 1.0 the whole leaf is already visible and
+        // moving the view would be a jump with no purpose. Reported as wanting
+        // the view to follow the selection instead of having to zoom out, find
+        // the next region, and zoom back in ("Leute sind bequemlich").
+        if let Some(ri) = self.center_on_region.take() {
+            if self.canvas_zoom > 1.01 {
+                if let Some(r) = self.regions.get(ri) {
+                    let [bx, by, bw, bh] = r.bbox_leaf;
+                    let (cx, cy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
+                    let z = self.canvas_zoom;
+                    self.canvas_pan = egui::vec2(
+                        fit_rect.width() * z * (0.5 - cx / sz.x.max(1.0)),
+                        fit_rect.height() * z * (0.5 - cy / sz.y.max(1.0)),
+                    );
+                }
+            }
+        }
         let img_rect = egui::Rect::from_center_size(
             fit_rect.center() + self.canvas_pan, fit_rect.size() * self.canvas_zoom,
         );
@@ -3596,18 +3682,20 @@ impl PipelineTab {
             let hover_leaf = resp.hover_pos().map(|p| {
                 ((p.x - img_rect.min.x) / s.max(1e-3), (p.y - img_rect.min.y) / s.max(1e-3))
             });
-            // live cursor-following preview shape
+            // live cursor-following preview shape, in the TARGET FAMILY's colour
+            // so the brush and the legend agree about what is being painted
+            let brush_col = self.brush_preview_color();
             if let Some((cx, cy)) = hover_leaf {
                 let mn = img_rect.min + egui::vec2((cx - half as f32) * s, (cy - half as f32) * s);
                 let sz = (self.brush_size as f32) * s;
                 match self.brush_shape {
                     BrushShape::Square => {
                         ui.painter().rect_stroke(egui::Rect::from_min_size(mn, egui::vec2(sz, sz)), 0.0,
-                            egui::Stroke::new(2.0, Color32::from_rgb(255, 150, 60)));
+                            egui::Stroke::new(2.0, brush_col));
                     }
                     BrushShape::Circle => {
                         ui.painter().circle_stroke(mn + egui::vec2(sz, sz) / 2.0, sz / 2.0,
-                            egui::Stroke::new(2.0, Color32::from_rgb(255, 150, 60)));
+                            egui::Stroke::new(2.0, brush_col));
                     }
                 }
             }
@@ -3647,7 +3735,10 @@ impl PipelineTab {
                     let mn = img_rect.min + egui::vec2(px as f32 * s, py as f32 * s);
                     ui.painter().rect_filled(
                         egui::Rect::from_min_size(mn, egui::vec2(px_sz, px_sz)),
-                        0.0, Color32::from_rgba_unmultiplied(255, 150, 60, 110),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(
+                            brush_col.r(), brush_col.g(), brush_col.b(), 110,
+                        ),
                     );
                 }
             }
@@ -5671,6 +5762,23 @@ impl PipelineTab {
                         if self.persisted.contains(&i) {
                             ui.painter().rect_filled(
                                 r, 3.0, Color32::from_rgba_unmultiplied(10, 25, 14, 90));
+                            // An explicit tick, not just the dim above. A 90-alpha
+                            // tint is easy to miss across a grid of small tiles,
+                            // and reviewers lost track of what they had already
+                            // checked — "vielleicht wäre eine Art Haken auf der
+                            // Darstellung noch besser sichtbar".
+                            //
+                            // Painted by hand rather than drawn as U+2713: the
+                            // bundled fonts do not cover it and it renders as
+                            // tofu. Same two-line_segment trick the stage pills
+                            // already use.
+                            let cc = egui::pos2(r.left() + 10.0, r.top() + 10.0);
+                            ui.painter().circle_filled(cc, 7.5, Color32::from_rgb(56, 152, 86));
+                            let tick = egui::Stroke::new(2.0, Color32::WHITE);
+                            ui.painter().line_segment(
+                                [cc + egui::vec2(-3.5, 0.2), cc + egui::vec2(-1.0, 3.0)], tick);
+                            ui.painter().line_segment(
+                                [cc + egui::vec2(-1.0, 3.0), cc + egui::vec2(3.6, -3.2)], tick);
                         }
                         if self.flagged.contains(&i) {
                             ui.painter().rect_stroke(r, 3.0,
@@ -5705,6 +5813,8 @@ impl PipelineTab {
                             } else {
                                 self.selected_idx = Some(self.regions[i].leaf);
                                 self.selected_region = Some(i);
+                                // Bring it into view if the canvas is zoomed in.
+                                self.center_on_region = Some(i);
                                 self.overlay_tex = None;
                             }
                             self.last_clicked_region = Some(i);
@@ -5726,6 +5836,7 @@ impl PipelineTab {
                             if ui.button("Select").clicked() {
                                 self.selected_idx = Some(self.regions[i].leaf);
                                 self.selected_region = Some(i);
+                                self.center_on_region = Some(i);
                                 self.overlay_tex = None;
                                 self.last_clicked_region = Some(i);
                                 ui.close_menu();
