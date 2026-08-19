@@ -259,6 +259,13 @@ enum CanvasTool { Select, MarkHealthy, Brush, Eraser, Knife, Scissor, Lasso, Wan
 #[derive(Clone)]
 struct RegionGeom {
     idx:  usize,
+    /// MUST be restored alongside `mask`. `mask` is indexed as `ly * bw + lx`
+    /// using this bbox's width and height, so the two are a matched pair —
+    /// `merge_region_group` grows a survivor's bbox to the union of everything
+    /// it absorbed, and restoring the smaller pre-merge mask against the larger
+    /// post-merge bbox indexes past the end and panics. That was a real crash on
+    /// Ctrl+Z after a brush stroke that merged into an existing region.
+    bbox: [u32; 4],
     mask: Vec<bool>,
     area: u32,
     crop: Vec<u8>,
@@ -1256,9 +1263,9 @@ impl PipelineTab {
                 let name = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
                 family_swatch(ui, cid, 10.0);
                 ui.label(format!("Selected: {name}"));
-                let label = if self.focus_mode { "Focus on  (/)" } else { "Focus off  (/)" };
+                let label = if self.focus_mode { "Focus on  (F)" } else { "Focus off  (F)" };
                 if ui.selectable_label(self.focus_mode, label)
-                    .on_hover_text("Dim every family except the selected one. Shortcut: /")
+                    .on_hover_text("Dim every family except the selected one. Shortcut: F")
                     .clicked()
                 {
                     self.toggle_focus_mode(toasts);
@@ -9526,6 +9533,7 @@ impl PipelineTab {
         let r = self.regions.get(idx)?;
         Some(RegionGeom {
             idx,
+            bbox: r.bbox_leaf,
             mask: r.mask.clone(),
             area: self.region_area.get(idx).copied().unwrap_or(0),
             crop: r.crop.clone(),
@@ -9536,6 +9544,8 @@ impl PipelineTab {
     /// tile does not keep showing the state we just reversed.
     fn restore_region(&mut self, g: &RegionGeom) {
         if let Some(r) = self.regions.get_mut(g.idx) {
+            // bbox and mask travel together — see RegionGeom::bbox.
+            r.bbox_leaf = g.bbox;
             r.mask = g.mask.clone();
             r.crop = g.crop.clone();
         }

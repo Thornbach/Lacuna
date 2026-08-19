@@ -69,10 +69,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_key: Key::ArrowDown },
     ActionDef { id: "region.prev", group: "Detections", label: "Previous detection",
         hint: "Back one detection.", default_key: Key::ArrowUp },
+    // A for "aside". Moved off F so Focus could take it — F was requested for
+    // Focus explicitly, and a key can only mean one thing.
     ActionDef { id: "region.flag", group: "Detections", label: "Set aside for later",
         hint: "Defer a hard call without stalling on it, and come back via the \
                filter. Deciding under fatigue is where label quality goes.",
-        default_key: Key::F },
+        default_key: Key::A },
 
     // ── tools ───────────────────────────────────────────────────────────────
     ActionDef { id: "tool.select", group: "Tools", label: "Select",
@@ -124,10 +126,10 @@ pub const ACTIONS: &[ActionDef] = &[
         hint: "Contours instead of filled regions.", default_key: Key::O },
     ActionDef { id: "view.recon", group: "View", label: "Toggle reconstruction tint",
         hint: "Show where the model thinks tissue was lost.", default_key: Key::F35 },
-    // Slash, not F: F is already "Set aside for later" (region.flag) and has the
-    // muscle memory to prove it. Slash was completely unbound.
+    // F for Focus, by explicit request. "Set aside for later" (region.flag) gave
+    // the key up and moved to A ("aside") — see its own note.
     ActionDef { id: "view.focus", group: "View", label: "Toggle family focus",
-        hint: "Dim every family except the selected one.", default_key: Key::Slash },
+        hint: "Dim every family except the selected one.", default_key: Key::F },
     ActionDef { id: "view.clear_focus", group: "View", label: "Clear family focus",
         hint: "Stop dimming the other families.", default_key: Key::F35 },
     ActionDef { id: "view.fit", group: "View", label: "Fit leaf to window",
