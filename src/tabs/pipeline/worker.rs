@@ -1594,12 +1594,31 @@ fn family_scatter(labels: &[i32]) -> Vec<[f32; 2]> {
 pub(crate) fn context_crop(rgba: &[u8], w: u32, h: u32, cx: f32, cy: f32, win: u32) -> Vec<u8> {
     let half = (win / 2) as i32;
     let (cx, cy) = (cx.round() as i32, cy.round() as i32);
+    // Zero-initialised, so anything we skip below stays RGBA(0,0,0,0).
     let mut out = vec![0u8; (win * win * 4) as usize];
     for oy in 0..win as i32 {
-        let sy = (cy - half + oy).clamp(0, h as i32 - 1) as u32;
+        let sy = cy - half + oy;
+        // Out-of-image rows/columns are left TRANSPARENT, not clamped.
+        //
+        // This used to `.clamp()` the source coordinate, which meant every row
+        // or column past the border re-sampled the same edge pixel — smearing
+        // it into a streak. Reported from review as anomalies near a leaf edge
+        // rendering with elongated pixels, visible in the region tiles but not
+        // on the main canvas (which draws the leaf directly, not through here).
+        //
+        // It is not only cosmetic: `region.crop` is also the CURATION crop the
+        // head retrains on, so clamping fed the model fabricated texture that
+        // exists nowhere in a real leaf. Transparent padding matches what the
+        // cutout already looks like just inside the border.
+        if sy < 0 || sy >= h as i32 {
+            continue;
+        }
         for ox in 0..win as i32 {
-            let sx = (cx - half + ox).clamp(0, w as i32 - 1) as u32;
-            let si = ((sy * w + sx) * 4) as usize;
+            let sx = cx - half + ox;
+            if sx < 0 || sx >= w as i32 {
+                continue;
+            }
+            let si = ((sy as u32 * w + sx as u32) * 4) as usize;
             let oi = ((oy as u32 * win + ox as u32) * 4) as usize;
             out[oi..oi + 4].copy_from_slice(&rgba[si..si + 4]);
         }

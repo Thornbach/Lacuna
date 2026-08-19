@@ -123,6 +123,10 @@ pub const ACTIONS: &[ActionDef] = &[
         hint: "Contours instead of filled regions.", default_key: Key::O },
     ActionDef { id: "view.recon", group: "View", label: "Toggle reconstruction tint",
         hint: "Show where the model thinks tissue was lost.", default_key: Key::F35 },
+    // Slash, not F: F is already "Set aside for later" (region.flag) and has the
+    // muscle memory to prove it. Slash was completely unbound.
+    ActionDef { id: "view.focus", group: "View", label: "Toggle family focus",
+        hint: "Dim every family except the selected one.", default_key: Key::Slash },
     ActionDef { id: "view.clear_focus", group: "View", label: "Clear family focus",
         hint: "Stop dimming the other families.", default_key: Key::F35 },
     ActionDef { id: "view.fit", group: "View", label: "Fit leaf to window",

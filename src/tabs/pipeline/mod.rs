@@ -527,6 +527,16 @@ pub struct PipelineTab {
     // forking a duplicate class.
     head_cache:       Option<(PathBuf, fewshot::FewShotHead)>,
     selected_cluster: Option<i32>,
+    /// Whether the canvas DIMS everything outside `selected_cluster`.
+    ///
+    /// Deliberately separate from the selection itself. Dimming used to be an
+    /// unavoidable consequence of picking a cluster — one field meant "what is
+    /// selected" and "hide everything else" at once — and reviewers disliked it
+    /// strongly, because selecting a family to work on is not the same as asking
+    /// for the rest of the leaf to disappear. Selection now highlights; focus is
+    /// opt-in via the button or `/`, and only bites when exactly one family is
+    /// selected.
+    focus_mode:       bool,
     // Curate gallery: restrict to `selected_idx`'s own regions. Off by
     // default (whole-dataset view, unchanged). Small regions are easy to
     // miss in the dataset-wide gallery, which made it hard to tell when a
@@ -815,6 +825,7 @@ impl PipelineTab {
             clusters:         Vec::new(),
             head_cache:       None,
             selected_cluster: None,
+            focus_mode:       false,
             filter_leaf_only: true,
             selected_region:  None,
             gallery_page:     0,
@@ -1189,17 +1200,29 @@ impl PipelineTab {
                     ui.separator();
                 }
             }
+            // Selection and focus are shown as two separate facts, because they
+            // ARE two separate things now — you can have a family selected
+            // without the rest of the leaf being dimmed. ASCII only: the bundled
+            // fonts have no U+2715 and render it as tofu.
             if let Some(cid) = self.selected_cluster {
                 let name = self.cluster_names.get(&cid).cloned().unwrap_or_else(|| format!("Cluster {cid}"));
                 family_swatch(ui, cid, 10.0);
-                ui.label(format!("Focused: {name}"));
-                if ui.small_button("✕ Exit focus").clicked() {
+                ui.label(format!("Selected: {name}"));
+                let label = if self.focus_mode { "Focus on  (/)" } else { "Focus off  (/)" };
+                if ui.selectable_label(self.focus_mode, label)
+                    .on_hover_text("Dim every family except the selected one. Shortcut: /")
+                    .clicked()
+                {
+                    self.toggle_focus_mode(toasts);
+                }
+                if ui.small_button("x Clear selection").clicked() {
                     self.selected_cluster = None;
                     self.selected_region = None;
+                    self.focus_mode = false;
                     self.overlay_tex = None;
                 }
             } else {
-                ui.label(RichText::new("No cluster focused").color(Color32::GRAY));
+                ui.label(RichText::new("No family selected").color(Color32::GRAY));
             }
             ui.separator();
 
@@ -1373,7 +1396,7 @@ impl PipelineTab {
 
         // View toggles have no dedicated UI keys elsewhere, so they dispatch here.
         for id in ["region.next", "region.prev", "region.flag",
-                   "view.outline", "view.recon", "view.clear_focus", "view.fit", "view.panel",
+                   "view.outline", "view.recon", "view.focus", "view.clear_focus", "view.fit", "view.panel",
                    "run.start", "run.cancel", "review.export", "review.confirm_family",
                    "review.undo"] {
             let k = self.keymap.key(id);
@@ -3094,12 +3117,58 @@ impl PipelineTab {
         match tool {
             CanvasTool::MarkHealthy => self.hardneg_label = "healthy".to_string(),
             CanvasTool::Brush | CanvasTool::Wand => {
-                self.hardneg_label = self.selected_cluster
-                    .and_then(|c| self.cluster_names.get(&c).cloned())
-                    .unwrap_or_default();
+                self.hardneg_label = self.brush_default_family().unwrap_or_default();
             }
             _ => {}
         }
+    }
+
+    /// The cluster the canvas should dim everything else for — `None` unless
+    /// focus mode is actually on. Every dimming site reads this, never
+    /// `selected_cluster` directly.
+    fn focus_cluster(&self) -> Option<i32> {
+        if self.focus_mode { self.selected_cluster } else { None }
+    }
+
+    /// Focus needs exactly one family to focus ON, so the toggle is inert
+    /// without a selection — reported as the control appearing to do nothing.
+    fn focus_available(&self) -> bool {
+        self.selected_cluster.is_some()
+    }
+
+    fn toggle_focus_mode(&mut self, toasts: &mut ToastManager) {
+        if !self.focus_available() {
+            toasts.info("Select a family first — focus dims everything except one family.");
+            return;
+        }
+        self.focus_mode = !self.focus_mode;
+        self.overlay_tex = None; // the dim state is baked into the overlay
+        if self.focus_mode {
+            let name = self
+                .selected_cluster
+                .and_then(|c| self.cluster_names.get(&c).cloned())
+                .unwrap_or_else(|| "family".to_string());
+            toasts.info(format!("Focus on {name}"));
+        } else {
+            toasts.info("Focus off");
+        }
+    }
+
+    /// Which family the brush should paint into unless told otherwise.
+    ///
+    /// Prefers the family of the REGION currently selected, and only then the
+    /// focus-mode cluster. That order is the whole point: this used to read
+    /// `selected_cluster` alone, so after reviewing a Nekrosis region the brush
+    /// was still set to whatever cluster had last been focused — reported as
+    /// people painting the wrong family without noticing, because reaching for
+    /// the brush right after reviewing a region obviously means "more of THAT".
+    fn brush_default_family(&self) -> Option<String> {
+        let cid = self
+            .selected_region
+            .and_then(|i| self.labels.get(i).copied())
+            .filter(|&c| c >= 0)
+            .or(self.selected_cluster)?;
+        self.cluster_names.get(&cid).cloned()
     }
 
     /// Tool-hotkey entry point (Photoshop-style single letters) — a no-op if
@@ -3291,7 +3360,7 @@ impl PipelineTab {
         // OTHER cluster's contour rather than skipping it, so the rest of the
         // leaf stays visible as context instead of disappearing.
         if self.overlay_outline {
-            let sel = self.selected_cluster;
+            let sel = self.focus_cluster();
             for (ri, r) in self.regions.iter().enumerate() {
                 if r.leaf != leaf_idx || !self.region_visible(ri) {
                     continue;
@@ -3516,6 +3585,16 @@ impl PipelineTab {
                             }
                             let (px, py) = (cxi + ox, cyi + oy);
                             if px < 0 || py < 0 || px >= lw || py >= lh {
+                                continue;
+                            }
+                            // Bounds are not enough: the leaf is a CUTOUT inside
+                            // its bounding box, so "inside the image" still
+                            // includes transparent background. Painting there
+                            // produced regions floating off the leaf, which then
+                            // carry into area stats and curation crops. Alpha 10
+                            // is the same validity bar tile_leaf and the hole
+                            // detector already use.
+                            if !self.leaf_pixel_valid(leaf_idx, px, py) {
                                 continue;
                             }
                             self.brush_stroke.insert((px, py));
@@ -4196,7 +4275,7 @@ impl PipelineTab {
 
     fn ensure_overlay(&mut self, ctx: &Context) {
         let Some(idx) = self.selected_idx else { return };
-        let sel = self.selected_cluster;
+        let sel = self.focus_cluster();
         let key = (idx, sel, self.show_recon, (self.overlay_alpha * 100.0) as u32,
                    self.overlay_outline, self.regions.len());
         if self.overlay_key == Some(key) && self.overlay_tex.is_some() {
@@ -5110,7 +5189,7 @@ impl PipelineTab {
         }
 
         // ── PCA scatter (click → nearest point's cluster) ──
-        let sel = self.selected_cluster;
+        let sel = self.focus_cluster();
         let plot = Plot::new("cluster_scatter").height(200.0).show(ui, |plot_ui| {
             for c in &self.clusters {
                 let focused = sel.map_or(true, |cid| c.id == cid);
@@ -5605,11 +5684,36 @@ impl PipelineTab {
                             }
                             self.last_clicked_region = Some(i);
                         }
-                        if resp.secondary_clicked() {
-                            self.remove_regions(&[i], toasts, true);
-                            self.multi_selected.remove(&i);
-                            if self.selected_region == Some(i) { self.selected_region = None; }
-                        }
+                        // Right-click opens a MENU; it does not delete.
+                        //
+                        // It used to call remove_regions directly, so anyone
+                        // right-clicking a tile to see what options existed
+                        // destroyed the region instead — reported as "da kann
+                        // man sich schnell vertun". A destructive action must be
+                        // something you choose, never something you discover.
+                        resp.context_menu(|ui| {
+                            ui.label(
+                                RichText::new(format!("Region {}", i + 1))
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            ui.separator();
+                            if ui.button("Select").clicked() {
+                                self.selected_idx = Some(self.regions[i].leaf);
+                                self.selected_region = Some(i);
+                                self.overlay_tex = None;
+                                self.last_clicked_region = Some(i);
+                                ui.close_menu();
+                            }
+                            if ui.button("Remove region").clicked() {
+                                self.remove_regions(&[i], toasts, true);
+                                self.multi_selected.remove(&i);
+                                if self.selected_region == Some(i) {
+                                    self.selected_region = None;
+                                }
+                                ui.close_menu();
+                            }
+                        });
                     }
                 });
             });
@@ -5827,6 +5931,7 @@ impl PipelineTab {
                 !self.effective_selection().is_empty(),
             "view.recon" => self.selected_idx.and_then(|i| self.results.get(i))
                 .map_or(false, |l| !l.recon_mask.is_empty()),
+            "view.focus" => self.focus_available(),
             "view.clear_focus" => self.selected_cluster.is_some(),
             _ => true,
         }
@@ -5948,9 +6053,11 @@ impl PipelineTab {
             "run.cancel" => self.cancel_flag.store(true, Ordering::Relaxed),
             "view.outline" => { self.overlay_outline = !self.overlay_outline; self.overlay_tex = None; }
             "view.recon"   => { self.show_recon = !self.show_recon; self.overlay_tex = None; }
+            "view.focus" => self.toggle_focus_mode(toasts),
             "view.clear_focus" => {
                 self.selected_cluster = None;
                 self.selected_region = None;
+                self.focus_mode = false;
                 self.overlay_tex = None;
             }
             "view.fit" => { self.canvas_zoom = 1.0; self.canvas_pan = egui::Vec2::ZERO; }
@@ -8383,16 +8490,44 @@ impl PipelineTab {
         self.wand_mask_tex = Some(ctx.load_texture("wand_mask_pending", ci, egui::TextureOptions::NEAREST));
     }
 
+    /// Is this leaf-space pixel actual leaf tissue rather than cutout background?
+    ///
+    /// Alpha > 10 matches `HOLE_ALPHA_THR` / `tile_leaf`, so a pixel can never be
+    /// simultaneously "paintable" here and "not leaf" to the detector.
+    fn leaf_pixel_valid(&self, leaf_idx: usize, px: i32, py: i32) -> bool {
+        let Some(leaf) = self.results.get(leaf_idx) else { return false };
+        if px < 0 || py < 0 || px >= leaf.w as i32 || py >= leaf.h as i32 {
+            return false;
+        }
+        let o = ((py as usize * leaf.w as usize) + px as usize) * 4 + 3;
+        leaf.rgba.get(o).is_some_and(|&a| a > 10)
+    }
+
     fn finish_brush_stroke(&mut self, leaf_idx: usize, toasts: &mut ToastManager) {
         let pts = std::mem::take(&mut self.brush_stroke);
         if pts.is_empty() {
             return;
         }
-        let label_name = self.hardneg_label.trim().to_string();
-        if label_name.is_empty() {
-            toasts.error("Type a cluster name first.");
-            return;
-        }
+        // Fall back to the selected region's family rather than refusing.
+        //
+        // This used to hard-error "Type a cluster name first" whenever the free-
+        // text field was empty, even with a family plainly selected — so a user
+        // who had just reviewed Sucker and painted more Sucker got a success
+        // toast and a "type a name" error in the same breath. Typing is now only
+        // required when there is genuinely nothing to infer from.
+        let label_name = match self.hardneg_label.trim() {
+            "" => match self.brush_default_family() {
+                Some(f) => {
+                    self.hardneg_label = f.clone();
+                    f
+                }
+                None => {
+                    toasts.error("Select a family first, or type a new name for it.");
+                    return;
+                }
+            },
+            s => s.to_string(),
+        };
 
         let (mut min_x, mut min_y) = (i32::MAX, i32::MAX);
         let (mut max_x, mut max_y) = (i32::MIN, i32::MIN);
