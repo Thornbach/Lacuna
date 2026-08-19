@@ -143,15 +143,56 @@ jobs:
             Windows) echo "(no dependency dump on Windows runners)" ;;
           esac
 
-      - name: Upload binary
+      # Assemble the distributable archive HERE, on the platform it targets.
+      #
+      # This is not premature: a .tar.gz built on Windows cannot carry a Unix
+      # executable bit (bsdtar has no --mode, and a Windows file has no mode to
+      # copy), so a macOS/Linux user unpacking it hits "permission denied" on a
+      # binary that looks perfectly fine. The runner's own binary already has +x
+      # from cargo, so tarring it here preserves what is already correct.
+      #
+      # Models are deliberately NOT included: ~760 MB, identical on every
+      # platform and both variants, so they ship as ONE separate download rather
+      # than eight duplicates. The app finds them beside the executable at
+      # runtime (src/paths.rs).
+      - name: Assemble package
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="pkg/Lacuna-${{ matrix.name }}"
+          mkdir -p "$STAGE/LICENSES"
+          # LICENSE is not optional — Lacuna is AGPL-3.0 because it incorporates
+          # a model trained with Ultralytics YOLO, and shipping a binary to
+          # someone is the distribution that triggers the obligation.
+          cp README.md THIRD_PARTY_LICENSES.md LICENSE "$STAGE/"
+          cp LICENSES/DINOv3-LICENSE.md "$STAGE/LICENSES/"
+          if [ -f "$BIN_DIR/lacuna.exe" ]; then
+            cp "$BIN_DIR/lacuna.exe" "$STAGE/"
+            # DirectML.dll is the ONE native library ort-sys links dynamically
+            # rather than statically, and it is only an inbox Windows component
+            # from Win10 1903 onward. Missing it kills the process silently,
+            # because release builds are windows_subsystem = "windows" — no
+            # console, no dialog. ort-sys drops a copy in the build dir.
+            find "$BIN_DIR" -maxdepth 1 -name 'DirectML.dll' -exec cp {} "$STAGE/" \; || true
+            [ -f "$STAGE/DirectML.dll" ] || echo "::warning::DirectML.dll not bundled; relies on the system copy"
+          else
+            cp "$BIN_DIR/lacuna" "$STAGE/"
+            chmod +x "$STAGE/lacuna"
+          fi
+          cd pkg
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "Lacuna-${{ matrix.name }}.zip" "Lacuna-${{ matrix.name }}" >/dev/null
+          else
+            tar czf "Lacuna-${{ matrix.name }}.tar.gz" "Lacuna-${{ matrix.name }}"
+          fi
+          ls -lh Lacuna-${{ matrix.name }}.*
+
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: lacuna-${{ matrix.name }}
-          # Models are NOT included — they are ~800 MB and belong on a release,
-          # not in a CI artifact. The app finds them next to the executable at
-          # runtime (see src/paths.rs), so a user drops models/ beside it.
           path: |
-            ${{ env.BIN_DIR }}/lacuna
-            ${{ env.BIN_DIR }}/lacuna.exe
+            pkg/Lacuna-${{ matrix.name }}.zip
+            pkg/Lacuna-${{ matrix.name }}.tar.gz
           if-no-files-found: error
           retention-days: 14

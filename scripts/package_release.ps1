@@ -1,14 +1,21 @@
 #requires -Version 5.1
 <#
-  Assemble the v0.5.0 release from CI artifacts.
+  Assemble a release from CI artifacts.
 
-    dist/release/Lacuna-v<ver>-models.zip            weights, ONE download for everyone
-    dist/release/Lacuna-v<ver>-windows-x64-wgpu.zip  binary + licences
-    dist/release/Lacuna-v<ver>-linux-x64-cpu.tar.gz  ...and so on, 8 of them
+    dist/release/Lacuna-v<ver>-models.zip              weights, ONE download for everyone
+    dist/release/Lacuna-v<ver>-windows-x64-wgpu.zip    binary + licences
+    dist/release/Lacuna-v<ver>-linux-x64-cpu.tar.gz    ...and so on, 8 of them
 
-  Why models are separate: they are ~760 MB and IDENTICAL across every platform
-  and both variants. Bundling them into each package meant shipping the same
-  weights eight times, ~6 GB of duplicate upload for no benefit.
+  CI already builds each per-platform archive ON the platform it targets, so
+  this script does not repack them — it renames them into release form. That is
+  deliberate: a .tar.gz built on Windows cannot carry a Unix executable bit
+  (bsdtar has no --mode, and a Windows file has no mode to copy), so macOS and
+  Linux users would hit "permission denied" on a binary that looks fine. Building
+  the archive on the runner preserves the +x cargo already set.
+
+  Models are separate because they are ~760 MB and IDENTICAL across every
+  platform and both variants. Bundling them into each package meant shipping the
+  same weights eight times, ~6 GB of duplicate upload for no benefit.
 
   The models bundle carries BOTH DINO formats on purpose:
     dino.onnx + .onnx.data      the cpu variant loads this through ONNX Runtime
@@ -16,14 +23,9 @@
   One bundle therefore serves either download. Dropping the "wrong" one would
   save ~327 MB and silently break half the packages.
 
-  Format differs by platform deliberately. Windows gets .zip; macOS and Linux get
-  .tar.gz because a zip written on Windows does not preserve the Unix executable
-  bit, and the first thing a user would hit is "permission denied" on a binary
-  that looks fine.
-
   Usage:
     powershell -ExecutionPolicy Bypass -File scripts\package_release.ps1 `
-      -RunId 32245601387 -Version 0.5.0 [-SamDir <path>] [-SkipDownload]
+      -RunId <ci-run-id> -Version 0.5.0 [-SamDir <path>] [-SkipDownload]
 #>
 param(
     [Parameter(Mandatory = $true)][string]$RunId,
@@ -41,21 +43,23 @@ if (-not (Test-Path $gh)) { $gh = "gh" }
 
 $out = Join-Path $root "dist\release"
 $dl  = Join-Path $root "dist\ci-artifacts"
+if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-# ── CI artifact name -> what we call it in the release ──────────────────────
-# CI's default feature set IS the wgpu variant (wgpu-gpu + ort-backend), so the
-# unsuffixed job names map to -wgpu here.
-$targets = @(
-    @{ ci = "lacuna-windows-x64";       name = "windows-x64-wgpu"; archive = "zip"; bin = "lacuna.exe" },
-    @{ ci = "lacuna-windows-x64-cpu";   name = "windows-x64-cpu";  archive = "zip"; bin = "lacuna.exe" },
-    @{ ci = "lacuna-linux-x64";         name = "linux-x64-wgpu";   archive = "tar"; bin = "lacuna" },
-    @{ ci = "lacuna-linux-x64-cpu";     name = "linux-x64-cpu";    archive = "tar"; bin = "lacuna" },
-    @{ ci = "lacuna-macos-arm64";       name = "macos-arm64-wgpu"; archive = "tar"; bin = "lacuna" },
-    @{ ci = "lacuna-macos-arm64-cpu";   name = "macos-arm64-cpu";  archive = "tar"; bin = "lacuna" },
-    @{ ci = "lacuna-macos-x64";         name = "macos-x64-wgpu";   archive = "tar"; bin = "lacuna" },
-    @{ ci = "lacuna-macos-x64-cpu";     name = "macos-x64-cpu";    archive = "tar"; bin = "lacuna" }
-)
+# CI job name -> release name. CI's default feature set IS the wgpu variant
+# (wgpu-gpu + ort-backend), so unsuffixed job names map to -wgpu here. The
+# *-burn rows are a build-health check for the pure-Rust fallback, not something
+# anyone downloads, so they are not shipped.
+$map = @{
+    "windows-x64"     = "windows-x64-wgpu"
+    "windows-x64-cpu" = "windows-x64-cpu"
+    "linux-x64"       = "linux-x64-wgpu"
+    "linux-x64-cpu"   = "linux-x64-cpu"
+    "macos-arm64"     = "macos-arm64-wgpu"
+    "macos-arm64-cpu" = "macos-arm64-cpu"
+    "macos-x64"       = "macos-x64-wgpu"
+    "macos-x64-cpu"   = "macos-x64-cpu"
+}
 
 if (-not $SkipDownload) {
     Write-Host "Downloading artifacts from run $RunId..." -ForegroundColor Cyan
@@ -65,68 +69,26 @@ if (-not $SkipDownload) {
     if ($LASTEXITCODE -ne 0) { throw "gh run download failed" }
 }
 
-# ── docs that travel with every binary ──────────────────────────────────────
-# LICENSE is not optional: Lacuna is AGPL-3.0 because it incorporates a model
-# trained with Ultralytics YOLO, and handing a binary to someone is exactly the
-# distribution that triggers the obligation. Fail loudly rather than ship without.
-$docs = @("README.md", "THIRD_PARTY_LICENSES.md", "LICENSE")
-foreach ($d in $docs) {
-    if (-not (Test-Path (Join-Path $root $d))) { throw "missing required document: $d" }
-}
-
-foreach ($t in $targets) {
-    $src = Join-Path $dl $t.ci
-    if (-not (Test-Path $src)) { Write-Warning "artifact missing, skipped: $($t.ci)"; continue }
-    $binSrc = Join-Path $src $t.bin
-    if (-not (Test-Path $binSrc)) { Write-Warning "binary missing in $($t.ci), skipped"; continue }
-
-    $stage = Join-Path $out "stage-$($t.name)"
-    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path (Join-Path $stage "LICENSES") | Out-Null
-
-    Copy-Item $binSrc $stage
-    foreach ($d in $docs) { Copy-Item (Join-Path $root $d) $stage }
-    $dino = Join-Path $root "dist\Lacuna-v$Version-cpu\LICENSES\DINOv3-LICENSE.md"
-    if (Test-Path $dino) { Copy-Item $dino (Join-Path $stage "LICENSES") }
-
-    # Windows also needs DirectML.dll beside the exe: ort-sys links it
-    # dynamically and it is only an inbox component from Win10 1903 onward.
-    # Without it the process dies silently (windows_subsystem = "windows").
-    if ($t.archive -eq "zip") {
-        $dml = Join-Path $root "target-cpu\release\DirectML.dll"
-        if (Test-Path $dml) { Copy-Item $dml $stage }
-        else { Write-Warning "DirectML.dll not found -- $($t.name) relies on the system copy" }
-    }
-
-    $base = "Lacuna-v$Version-$($t.name)"
-    if ($t.archive -eq "zip") {
-        $dst = Join-Path $out "$base.zip"
-        if (Test-Path $dst) { Remove-Item $dst -Force }
-        Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $dst
-    }
-    else {
-        # tar preserves the executable bit; Compress-Archive does not, and a
-        # macOS/Linux user would hit "permission denied" on an otherwise fine
-        # binary. bsdtar ships with Windows 10+.
-        $dst = Join-Path $out "$base.tar.gz"
-        if (Test-Path $dst) { Remove-Item $dst -Force }
-        Push-Location $stage
-        try { & tar --create --gzip --file $dst --mode='a+x' * } finally { Pop-Location }
-    }
-    Remove-Item $stage -Recurse -Force
-    Write-Host ("  {0,-34} {1,7:N1} MB" -f (Split-Path $dst -Leaf), ((Get-Item $dst).Length / 1MB)) -ForegroundColor Green
+foreach ($job in $map.Keys | Sort-Object) {
+    $src = Join-Path $dl "lacuna-$job"
+    if (-not (Test-Path $src)) { Write-Warning "artifact missing, skipped: lacuna-$job"; continue }
+    $archive = Get-ChildItem $src -File | Where-Object { $_.Extension -in ".zip", ".gz" } | Select-Object -First 1
+    if (-not $archive) { Write-Warning "no archive inside lacuna-$job, skipped"; continue }
+    $ext = if ($archive.Name -like "*.tar.gz") { "tar.gz" } else { "zip" }
+    $dst = Join-Path $out "Lacuna-v$Version-$($map[$job]).$ext"
+    Copy-Item $archive.FullName $dst -Force
+    Write-Host ("  {0,-38} {1,7:N1} MB" -f (Split-Path $dst -Leaf), ((Get-Item $dst).Length / 1MB)) -ForegroundColor Green
 }
 
 # ── the shared models bundle ────────────────────────────────────────────────
 Write-Host "Building the models bundle..." -ForegroundColor Cyan
 $mstage = Join-Path $out "stage-models"
-if (Test-Path $mstage) { Remove-Item $mstage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path (Join-Path $mstage "models\recon") | Out-Null
 
 $models = Join-Path $root "models"
 $need = @(
-    "dino.onnx", "dino.onnx.data",     # cpu variant, via ONNX Runtime
-    "dino_weights.safetensors",         # wgpu variant, via BURN
+    "dino.onnx", "dino.onnx.data",      # cpu variant, via ONNX Runtime
+    "dino_weights.safetensors",          # wgpu variant, via BURN
     "yolo_weights.safetensors",
     "fewshot_head.json",
     "detector_meta.json"
@@ -152,18 +114,16 @@ if ($SamDir) {
     if (-not $ok) { Remove-Item $samStage -Recurse -Force }
 }
 
+# The DINOv3 licence must travel with the weights: its terms grant
+# redistribution only on condition that a copy of the agreement goes with them.
 Copy-Item (Join-Path $root "THIRD_PARTY_LICENSES.md") $mstage
-$dino = Join-Path $root "dist\Lacuna-v$Version-cpu\LICENSES\DINOv3-LICENSE.md"
-if (Test-Path $dino) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $mstage "LICENSES") | Out-Null
-    Copy-Item $dino (Join-Path $mstage "LICENSES")
-}
+New-Item -ItemType Directory -Force -Path (Join-Path $mstage "LICENSES") | Out-Null
+Copy-Item (Join-Path $root "LICENSES\DINOv3-LICENSE.md") (Join-Path $mstage "LICENSES")
 
 $mzip = Join-Path $out "Lacuna-v$Version-models.zip"
-if (Test-Path $mzip) { Remove-Item $mzip -Force }
 Compress-Archive -Path (Join-Path $mstage "*") -DestinationPath $mzip
 Remove-Item $mstage -Recurse -Force
-Write-Host ("  {0,-34} {1,7:N1} MB" -f (Split-Path $mzip -Leaf), ((Get-Item $mzip).Length / 1MB)) -ForegroundColor Green
+Write-Host ("  {0,-38} {1,7:N1} MB" -f (Split-Path $mzip -Leaf), ((Get-Item $mzip).Length / 1MB)) -ForegroundColor Green
 
 Write-Host "`nDone -> $out" -ForegroundColor Green
 Get-ChildItem $out -File | Sort-Object Name |
