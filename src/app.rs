@@ -503,14 +503,11 @@ fn fill_bundled_defaults(d: &mut AppDefaults) {
     // `.onnx` first (keeps the ort fallback working on dev machines); fall back to
     // the BURN `.safetensors` so a shipped package needs only the weights.
     if d.yolo.is_none() { d.yolo = pick("yolo.onnx").or_else(|| pick("yolo_weights.safetensors")); }
-    // CPU builds run DINO at 256 (worker::default_dino_res) on a fixed-shape ort
-    // graph, so they need the 256 export. A shipped cpu package has exactly one
-    // dino.onnx and it is already the right one — this extra probe is for the
-    // DEV TREE, where models\dino.onnx is the 512 export and models\cpu256\ holds
-    // the 256. Without it a CPU dev build picks 512 and runs ~4x slower than it
-    // needs to. GPU builds never look here.
-    #[cfg(not(any(feature = "cuda", feature = "wgpu-gpu")))]
-    if d.dino.is_none() { d.dino = pick("cpu256/dino.onnx"); }
+    // Note this picks the RESOLUTION as well as the file: an ort graph carries a
+    // baked-in input size that DinoExtractor::load adopts. models\dino.onnx is
+    // 512 (the calibrated default); models\cpu256\dino.onnx is the 256 export,
+    // ~5x faster and materially less accurate, and is deliberately NOT probed
+    // for here — someone who wants it selects it explicitly.
     if d.dino.is_none() { d.dino = pick("dino.onnx").or_else(|| pick("dino_weights.safetensors")); }
     if d.bank.is_none() { d.bank = pick("coreset_bank.bin"); }
     if d.meta.is_none() { d.meta = pick("detector_meta.json"); }

@@ -83,7 +83,10 @@ safetensors = "0.4"
 argmin = "0.10"
 argmin-math = { version = "0.4", features = ["vec"] }
 
-[build-dependencies]
+# winres embeds the .exe icon and is Windows-only. Target-gated so a Linux or
+# macOS build does not pull in and compile a crate it can never use — build.rs
+# already guards the call site with #[cfg(target_os = "windows")].
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
 [profile.release]

@@ -137,33 +137,29 @@ pub(crate) const NOVEL_FAMILY: i32 = 9998;
 // detector operating point before something is worth surfacing as "novel".
 const NOVEL_CONFIDENCE_MULT: f32 = 1.5;
 
-/// DINO input resolution for detection tiles, chosen per backend at compile time.
+/// DINO input resolution for detection tiles. **512 on every backend.**
 ///
-/// GPU builds stay at 512. CPU builds drop to 256, which is the single biggest
-/// speed lever available and the reason a CPU-only laptop can run this at all.
+/// A CPU-only 256 default was tried and REVERTED (2026-08-18). It is ~5x cheaper
+/// per tile, but 256 with the default 256 px tile means each patch describes 16
+/// native pixels instead of 8, and the head was fit at 8. Measured over three
+/// leaves, same binary and segmentation, tau held constant: 834 regions at 512
+/// against 307 at 256. Field verdict on the same scale change via tile size was
+/// blunter — "accuracy is super shitty" at 16 px/patch, "nearly perfect" at 8.
 ///
-/// Why it is worth the accuracy: cost scales with token count, and ViT-B/16 sees
-/// (res/16)^2 tokens — 1024 at 512, 256 at 256. Measured on a Ryzen 7 5800X with
-/// the ort CPU EP: 545 ms/tile at 512. Isolated scaling measurements put 256 at
-/// 5.89x cheaper. Combined with the ort backend (7.1x over burn ndarray, also
-/// measured) that is the difference between ~33 min/leaf and ~1 min/leaf on the
-/// kind of laptop this gets demoed on.
+/// It turned out not to be a trade worth making, because DINO was never the real
+/// cost on CPU once the backend was fixed: with the ort CPU EP a 512 tile is
+/// ~500 ms and a whole leaf is a few seconds. The 30 s/leaf that prompted all of
+/// this was PatchCore's bank kNN (~236 G MAC/tile on ndarray), which is opt-in,
+/// off by default, and measured to change nothing on this data.
 ///
-/// What it costs: each patch then describes 16 native px instead of 8, and the
-/// tile is no longer upsampled 2x on its way in. A June 2026 evaluation over the
-/// same 1829 GT tiles measured 512 vs 256 at tau=0.9 as pixel IoU 0.4406 ->
-/// 0.4063 and family purity 0.944 -> 0.942 — but per-family RECALL fell harder
-/// (Cluster 5: 40% -> 28%), which is why `default_head_tau` drops with it.
+/// Resolution is still selectable — by choosing the MODEL, not this constant.
+/// `1Help/export_dinov3.py` exports with `dynamic_axes=None`, so each .onnx has
+/// its resolution baked in and `DinoExtractor::load` adopts whatever the loaded
+/// graph declares. `models/dino.onnx` is 512; `models/cpu256/dino.onnx` is 256
+/// for anyone who wants the speed and accepts the cost.
 ///
-/// The ort path takes its shape from the ONNX graph, which has the resolution
-/// BAKED IN (`dynamic_axes=None` in 1Help/export_dinov3.py), so a CPU package
-/// must ship the matching export — scripts/package.ps1 maps dino_256.onnx onto
-/// models/dino.onnx for the cpu variant. BURN has no fixed input shape and
-/// follows this value directly.
-///
-/// `LACUNA_DINO_RES` overrides at runtime, for A/B testing a resolution without
-/// a 10-minute rebuild. On the ort path it will fail unless a matching graph is
-/// what got loaded, so it is a development knob, not a user-facing setting.
+/// `LACUNA_DINO_RES` still overrides, which only affects the BURN path — ort
+/// takes its shape from the graph regardless.
 pub fn default_dino_res() -> u32 {
     if let Ok(v) = std::env::var("LACUNA_DINO_RES") {
         if let Ok(r) = v.trim().parse::<u32>() {
@@ -174,10 +170,7 @@ pub fn default_dino_res() -> u32 {
             eprintln!("[dino] ignoring LACUNA_DINO_RES={v} (need a multiple of 16, >= 64)");
         }
     }
-    #[cfg(any(feature = "cuda", feature = "wgpu-gpu"))]
-    { 512 }
-    #[cfg(not(any(feature = "cuda", feature = "wgpu-gpu")))]
-    { 256 }
+    512
 }
 
 pub struct PipeConfig {

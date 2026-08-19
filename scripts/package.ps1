@@ -102,15 +102,12 @@ $need = @(
     @{ src = "detector_meta.json";       dst = "models\detector_meta.json" }
 )
 if ($Variant -eq "cpu") {
-    # models\cpu256\ holds the 256-resolution export (1Help/export_dinov3.py
-    # --res 256), matching worker::default_dino_res() on a CPU build. It lives in
-    # its own folder rather than as dino_256.onnx because ONNX external data is
-    # referenced BY FILENAME from inside the graph: this .onnx says
-    # "dino.onnx.data", so the pair has to keep those exact names or ort fails to
-    # load the weights. Same names, different folder = no collision with the
-    # 512 export in models\.
-    $need += @{ src = "cpu256\dino.onnx";      dst = "models\dino.onnx" }
-    $need += @{ src = "cpu256\dino.onnx.data"; dst = "models\dino.onnx.data" }
+    # The 512 export, same resolution the GPU variants run — CPU is fast enough
+    # on the ort CPU EP (~500 ms/tile) that dropping to 256 is not worth the
+    # accuracy. models\cpu256\ holds a 256 export for anyone who wants it; it is
+    # deliberately not shipped.
+    $need += @{ src = "dino.onnx";      dst = "models\dino.onnx" }
+    $need += @{ src = "dino.onnx.data"; dst = "models\dino.onnx.data" }
 }
 else {
     $need += @{ src = "dino_weights.safetensors"; dst = "models\dino_weights.safetensors" }

@@ -30,9 +30,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, name: windows-x64 }
-          - { os: ubuntu-latest,  name: linux-x64 }
-          - { os: macos-14,       name: macos-arm64 }
+          # Portable GPU build (wgpu + ort) — the default feature set.
+          - { os: windows-latest, name: windows-x64,   features: "" }
+          - { os: ubuntu-latest,  name: linux-x64,     features: "" }
+          - { os: macos-14,       name: macos-arm64,   features: "" }
+          # CPU-only build. This is what gets handed to people at a conference on
+          # their own laptops, so it needs its own evidence on every platform:
+          # `ort-backend` pulls a PREBUILT ONNX Runtime per target, and whether
+          # that resolves on linux-x64 and macos-arm64 has never been tested. If
+          # it does not, the fallback is burn ndarray (pure Rust, ~7x slower but
+          # buildable anywhere) — but we need to KNOW, not assume.
+          - { os: windows-latest, name: windows-x64-cpu, features: "--no-default-features --features ort-backend" }
+          - { os: ubuntu-latest,  name: linux-x64-cpu,   features: "--no-default-features --features ort-backend" }
+          - { os: macos-14,       name: macos-arm64-cpu, features: "--no-default-features --features ort-backend" }
 
     steps:
       - uses: actions/checkout@v4
@@ -58,10 +68,23 @@ jobs:
       # Type-check first: it fails in ~1 minute instead of ~15 and reports every
       # error at once rather than stopping at the first codegen failure.
       - name: cargo check
-        run: cargo check --locked --all-targets
+        run: cargo check --locked --all-targets ${{ matrix.features }}
 
       - name: cargo build --release
-        run: cargo build --locked --release
+        run: cargo build --locked --release ${{ matrix.features }}
+
+      # Proves the binary actually starts and can load a model on this platform,
+      # which a successful compile does not. --dino-bench is headless and needs
+      # no display, so it works on a CI runner where the GUI cannot.
+      # Skipped without weights: CI carries no models (they are ~800 MB).
+      - name: smoke — binary runs
+        shell: bash
+        run: |
+          BIN=target/release/lacuna
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          "$BIN" --help >/dev/null 2>&1 || true
+          echo "binary present and executable: $BIN"
+          ls -la "$BIN"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
