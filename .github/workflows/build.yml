@@ -61,6 +61,18 @@ jobs:
           - { os: macos-14,       name: macos-arm64-cpu,   features: "--no-default-features --features ort-backend" }
           - { os: macos-14,       name: macos-x64-cpu,     features: "--no-default-features --features ort-backend", target: x86_64-apple-darwin }
 
+          # ── CUDA / NVIDIA build ────────────────────────────────────────────
+          # Windows and Linux ONLY. There is no macOS row and there cannot be:
+          # Apple dropped NVIDIA driver support years ago and Apple Silicon has
+          # no NVIDIA hardware at all, so on Mac the GPU path IS wgpu (Metal).
+          #
+          # We only COMPILE here — the runners have no GPU, so this proves the
+          # CUDA feature builds, not that it runs. Linux CUDA has never been
+          # built anywhere, and nobody on the project has a Linux machine to try
+          # it on, so CI is the only route to that binary existing at all.
+          - { os: windows-latest, name: windows-x64-cuda,  features: "--no-default-features --features cuda,ort-backend", cuda: true }
+          - { os: ubuntu-latest,  name: linux-x64-cuda,    features: "--no-default-features --features cuda,ort-backend", cuda: true }
+
           # ── the fallback, proved separately ────────────────────────────────
           # Pure-Rust burn ndarray, no ONNX Runtime at all. ~7x slower, but it
           # depends on nothing but the Rust toolchain, so it is what we ship if
@@ -91,6 +103,17 @@ jobs:
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev libgtk-3-dev
+
+      # burn-cuda needs the CUDA SDK to build (it compiles kernels through nvrtc
+      # at runtime, but still links against the runtime libraries). Only the two
+      # cuda rows pay this ~3-5 GB install.
+      - name: CUDA toolkit
+        if: matrix.cuda
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.6.0'
+          method: network
+          sub-packages: '["nvcc", "cudart", "nvrtc", "nvrtc_dev"]'
 
       - uses: dtolnay/rust-toolchain@stable
         with:

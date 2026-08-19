@@ -64,5 +64,12 @@ Full per-crate license texts can be generated with `cargo about` or `cargo-licen
 
 ## Lacuna's own license
 
-Given the Ultralytics YOLO (AGPL-3.0) dependency, Lacuna is intended to be released under
-**AGPL-3.0**. See `LICENSE` (to be added) at the repository root.
+Given the Ultralytics YOLO (AGPL-3.0) dependency, Lacuna is released under
+**AGPL-3.0-only**. The full text is in `LICENSE` at the repository root, and is
+bundled in every distributed package.
+
+Practically, for anyone handing this to colleagues or conference attendees: that
+is distribution to third parties, so recipients are entitled to the corresponding
+source of the version they received, under AGPL-3.0. Point them at the repository
+(or ship `Lacuna-src-<commit>.zip` alongside the binary) rather than the binary
+alone.

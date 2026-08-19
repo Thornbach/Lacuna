@@ -1,8 +1,13 @@
 [package]
 name = "lacuna"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["Tobias Müller"]
+# AGPL-3.0 because Lacuna incorporates a model trained with Ultralytics YOLO,
+# which is AGPL-3.0 — see THIRD_PARTY_LICENSES.md. Distributing Lacuna therefore
+# carries the obligation to make its corresponding source available to
+# recipients under the same terms.
+license = "AGPL-3.0-only"
 description = "Lacuna — a Rust toolkit for reading leaves: segmentation, anomaly detection, reconstruction, and shape-complexity morphology."
 
 [[bin]]
