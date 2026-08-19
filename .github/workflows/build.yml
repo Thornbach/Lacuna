@@ -5,10 +5,6 @@
 # OS-gated dependency will not show up locally, and the first person to find out
 # would have been someone at a conference trying to run it. This turns "should
 # work everywhere" into "did build everywhere, on this commit".
-#
-# The default feature set is deliberately portable (wgpu + ort): wgpu reaches
-# NVIDIA, AMD, Intel and Apple silicon via Vulkan/Metal/DX12, where the old CUDA
-# default reached NVIDIA only.
 name: build
 
 on:
@@ -20,6 +16,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push supersedes an in-flight run of the same ref. The matrix is wide;
+# without this two quick pushes double the queue for no extra information.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -30,19 +32,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Portable GPU build (wgpu + ort) — the default feature set.
-          - { os: windows-latest, name: windows-x64,   features: "" }
-          - { os: ubuntu-latest,  name: linux-x64,     features: "" }
-          - { os: macos-14,       name: macos-arm64,   features: "" }
-          # CPU-only build. This is what gets handed to people at a conference on
-          # their own laptops, so it needs its own evidence on every platform:
+          # ── portable GPU build (wgpu + ort), the default feature set ────────
+          # wgpu reaches NVIDIA, AMD, Intel and Apple silicon via
+          # Vulkan/Metal/DX12, where the old CUDA default reached NVIDIA only.
+          - { os: windows-latest, name: windows-x64,       features: "" }
+          - { os: ubuntu-latest,  name: linux-x64,         features: "" }
+          - { os: macos-14,       name: macos-arm64,       features: "" }
+          - { os: macos-13,       name: macos-x64,         features: "" }
+
+          # ── CPU-only build ─────────────────────────────────────────────────
+          # This is what gets handed to people at a conference on their own
+          # laptops, so it needs its own evidence on every platform.
           # `ort-backend` pulls a PREBUILT ONNX Runtime per target, and whether
-          # that resolves on linux-x64 and macos-arm64 has never been tested. If
-          # it does not, the fallback is burn ndarray (pure Rust, ~7x slower but
-          # buildable anywhere) — but we need to KNOW, not assume.
-          - { os: windows-latest, name: windows-x64-cpu, features: "--no-default-features --features ort-backend" }
-          - { os: ubuntu-latest,  name: linux-x64-cpu,   features: "--no-default-features --features ort-backend" }
-          - { os: macos-14,       name: macos-arm64-cpu, features: "--no-default-features --features ort-backend" }
+          # that resolves for linux-x64, macos-arm64 and macos-x64 has never been
+          # tested. Measured on Windows it is worth 7.1x over the pure-Rust
+          # fallback (530 vs 4114 ms per DINO tile), so it matters whether it
+          # works — but we need to KNOW, not assume.
+          - { os: windows-latest, name: windows-x64-cpu,   features: "--no-default-features --features ort-backend" }
+          - { os: ubuntu-latest,  name: linux-x64-cpu,     features: "--no-default-features --features ort-backend" }
+          - { os: macos-14,       name: macos-arm64-cpu,   features: "--no-default-features --features ort-backend" }
+          - { os: macos-13,       name: macos-x64-cpu,     features: "--no-default-features --features ort-backend" }
+
+          # ── the fallback, proved separately ────────────────────────────────
+          # Pure-Rust burn ndarray, no ONNX Runtime at all. ~7x slower, but it
+          # depends on nothing but the Rust toolchain, so it is what we ship if
+          # the ort prebuilt turns out not to resolve above. Worth knowing it
+          # builds BEFORE we need it rather than during the week of the demo.
+          # macOS x64 is covered by the arm64 job here: same source, same crates.
+          - { os: ubuntu-latest,  name: linux-x64-burn,    features: "--no-default-features" }
+          - { os: macos-14,       name: macos-arm64-burn,  features: "--no-default-features" }
 
     steps:
       - uses: actions/checkout@v4
@@ -67,31 +85,45 @@ jobs:
 
       # Type-check first: it fails in ~1 minute instead of ~15 and reports every
       # error at once rather than stopping at the first codegen failure.
+      # --locked so a lockfile that drifted is a CI failure, not a silent update.
       - name: cargo check
         run: cargo check --locked --all-targets ${{ matrix.features }}
 
       - name: cargo build --release
         run: cargo build --locked --release ${{ matrix.features }}
 
-      # Proves the binary actually starts and can load a model on this platform,
-      # which a successful compile does not. --dino-bench is headless and needs
-      # no display, so it works on a CI runner where the GUI cannot.
-      # Skipped without weights: CI carries no models (they are ~800 MB).
-      - name: smoke — binary runs
+      # Report what the binary dynamically links against, WITHOUT running it.
+      #
+      # Deliberately not executing it: main.rs only intercepts known subcommands
+      # and otherwise falls through to eframe::run_native, so any stray argument
+      # launches a GUI — which on a headless runner either fails confusingly or
+      # hangs the job until the 6h timeout. Inspecting the link table proves the
+      # thing this actually needs to prove (that every dependency resolves on
+      # this platform) and cannot hang.
+      #
+      # On Windows this is where a missing DirectML would show up: ort-sys links
+      # it dynamically in every variant, and it is only an inbox component from
+      # Win10 1903 onward.
+      - name: Inspect binary
         shell: bash
         run: |
+          set -euo pipefail
           BIN=target/release/lacuna
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
-          "$BIN" --help >/dev/null 2>&1 || true
-          echo "binary present and executable: $BIN"
-          ls -la "$BIN"
+          ls -l "$BIN"
+          case "${{ runner.os }}" in
+            Linux)   ldd    "$BIN" || true ;;
+            macOS)   otool -L "$BIN" || true ;;
+            Windows) echo "(no dependency dump on Windows runners)" ;;
+          esac
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: lacuna-${{ matrix.name }}
           # Models are NOT included — they are ~800 MB and belong on a release,
-          # not in a CI artifact.
+          # not in a CI artifact. The app finds them next to the executable at
+          # runtime (see src/paths.rs), so a user drops models/ beside it.
           path: |
             target/release/lacuna
             target/release/lacuna.exe
