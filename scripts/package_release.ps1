@@ -38,6 +38,31 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+# Write a zip with FORWARD-SLASH entry names.
+#
+# Compress-Archive writes Windows path separators into the archive. The ZIP
+# spec requires '/', so Windows tools tolerate the result but Linux `unzip`
+# reads "models\dino.onnx" as ONE filename containing a backslash and dumps
+# every model into the top level with a mangled name. Reported from a real
+# Linux extraction of the v0.5.0 models bundle.
+function New-PosixZip {
+    param([string]$SourceDir, [string]$Destination)
+    Add-Type -AssemblyName System.IO.Compression | Out-Null
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    if (Test-Path $Destination) { Remove-Item $Destination -Force }
+    $base = (Resolve-Path $SourceDir).Path.TrimEnd('\') + '\'
+    $zip = [System.IO.Compression.ZipFile]::Open($Destination, 'Create')
+    try {
+        foreach ($f in Get-ChildItem $SourceDir -Recurse -File) {
+            $rel = $f.FullName.Substring($base.Length) -replace '\\', '/'
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip, $f.FullName, $rel,
+                [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    }
+    finally { $zip.Dispose() }
+}
 $gh   = "C:\Program Files\GitHub CLI\gh.exe"
 if (-not (Test-Path $gh)) { $gh = "gh" }
 
@@ -121,7 +146,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $mstage "LICENSES") | Out-N
 Copy-Item (Join-Path $root "LICENSES\DINOv3-LICENSE.md") (Join-Path $mstage "LICENSES")
 
 $mzip = Join-Path $out "Lacuna-v$Version-models.zip"
-Compress-Archive -Path (Join-Path $mstage "*") -DestinationPath $mzip
+New-PosixZip -SourceDir $mstage -Destination $mzip
 Remove-Item $mstage -Recurse -Force
 Write-Host ("  {0,-38} {1,7:N1} MB" -f (Split-Path $mzip -Leaf), ((Get-Item $mzip).Length / 1MB)) -ForegroundColor Green
 

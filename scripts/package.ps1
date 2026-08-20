@@ -187,9 +187,27 @@ catch {
 }
 
 # 6. Zip.
+#
+# NOT Compress-Archive: it writes Windows path separators into the archive.
+# The ZIP spec requires '/', so Windows tools tolerate the result but Linux
+# `unzip` reads "models\dino.onnx" as ONE filename containing a backslash and
+# drops every model into the top level with a mangled name. Reported from a
+# real Linux extraction of the v0.5.0 models bundle.
 $zip = Join-Path $root "dist\Lacuna-v$Version-$Variant.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
+Add-Type -AssemblyName System.IO.Compression | Out-Null
+Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+$base = (Resolve-Path $stage).Path.TrimEnd('\') + '\'
+$zf = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
+try {
+    foreach ($f in Get-ChildItem $stage -Recurse -File) {
+        $rel = $f.FullName.Substring($base.Length) -replace '\\', '/'
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $zf, $f.FullName, $rel,
+            [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+}
+finally { $zf.Dispose() }
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host "Done -> $zip ($mb MB)" -ForegroundColor Green
 Write-Host "  Contents: lacuna.exe + models\ + licenses. Users extract & run lacuna.exe." -ForegroundColor Green
